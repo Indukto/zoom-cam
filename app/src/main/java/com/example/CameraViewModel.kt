@@ -254,7 +254,7 @@ class CameraViewModel : ViewModel() {
         val wBox = screenWidth * boxWidthFraction
         val hBox = wBox * 1.35f
         val xBox = (screenWidth - wBox) / 2f
-        val yBox = (screenHeight - hBox) / 2.3f
+        val yBox = (screenHeight - hBox) / 2.3f + 6f
 
         // Map screen Zoom Box to Bitmap coordinates
         val xCropStart = (xVisibleStart + (xBox / screenWidth) * wVisible).toInt().coerceIn(0, bitmap.width - 1)
