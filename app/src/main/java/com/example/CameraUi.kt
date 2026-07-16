@@ -224,6 +224,7 @@ fun CameraActiveScreen(
     // Observe state flows
     val zoomRatio by viewModel.zoomRatio.collectAsState()
     val focalLength by viewModel.focalLength.collectAsState()
+    val baseFocalLength by viewModel.baseFocalLength.collectAsState()
     val exposure by viewModel.exposure.collectAsState()
     val temperature by viewModel.temperature.collectAsState()
     val flashMode by viewModel.flashMode.collectAsState()
@@ -259,10 +260,12 @@ fun CameraActiveScreen(
         CameraPreviewView(
             modifier = Modifier.fillMaxSize(),
             zoomRatio = zoomRatio,
+            baseFocalLength = baseFocalLength,
             exposure = exposure,
             flashMode = flashMode,
             isFrontCamera = isFrontCamera,
             onZoomChanged = { viewModel.setZoom(it) },
+            onAvailableFocalLengths = { viewModel.setAvailableFocalLengths(it) },
             imageCaptureProvider = { activeImageCapture = it }
         )
 
@@ -281,8 +284,10 @@ fun CameraActiveScreen(
             )
         }
 
-        // Dynamic box scale based on the target focal length relative to base 35mm view
-        val targetFraction = (0.85f * (35f / focalLength.toFloat())).coerceIn(0.15f, 0.95f)
+        // Dynamic box scale based on the target focal length relative to the actual physical lens
+        // The box shows the crop area: box_width = screen_width * (f_base / f_target)
+        // Starting with a max visible fraction of 0.85 at 1:1 zoom
+        val targetFraction = (0.85f * (baseFocalLength.toFloat() / focalLength.toFloat())).coerceIn(0.15f, 0.85f)
         val animatedBoxWidthFraction by animateFloatAsState(
             targetValue = targetFraction,
             animationSpec = spring(stiffness = 200f, dampingRatio = 0.75f),
@@ -473,16 +478,18 @@ fun CameraActiveScreen(
                         )
                     }
 
-                    // Focal length / Lens switcher presets circle ("35", "50", "85")
+                    // Focal length / Lens switcher presets circle (cycles through common presets)
                     Box(
                         modifier = Modifier
                             .size(44.dp)
                             .background(Color(0xFF2C2C2E), CircleShape)
                             .clickable {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                val nextPreset = when (focalLength) {
-                                    in 30..42 -> 50
-                                    in 43..65 -> 85
+                                // Cycle through common target focal lengths: 35 → 50 → 85 → 135 → back to 35
+                                val nextPreset = when {
+                                    focalLength <= 42 -> 50
+                                    focalLength <= 65 -> 85
+                                    focalLength <= 110 -> 135
                                     else -> 35
                                 }
                                 viewModel.selectLensPreset(nextPreset)
@@ -490,11 +497,7 @@ fun CameraActiveScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = when (focalLength) {
-                                in 30..42 -> "35"
-                                in 43..65 -> "50"
-                                else -> "85"
-                            },
+                            text = "${focalLength}",
                             color = Color.White,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,

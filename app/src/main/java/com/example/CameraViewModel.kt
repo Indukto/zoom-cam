@@ -29,11 +29,21 @@ data class ExifData(
 
 class CameraViewModel : ViewModel() {
 
+    // The user-facing target focal length (e.g. 35mm, 50mm, 60mm, 85mm)
+    private val _focalLength = MutableStateFlow(35)
+    val focalLength: StateFlow<Int> = _focalLength.asStateFlow()
+
+    // The actual physical lens that is selected (largest ≤ target)
+    private val _baseFocalLength = MutableStateFlow(35)
+    val baseFocalLength: StateFlow<Int> = _baseFocalLength.asStateFlow()
+
+    // Digital zoom factor = targetFocalLength / baseFocalLength
     private val _zoomRatio = MutableStateFlow(1.0f)
     val zoomRatio: StateFlow<Float> = _zoomRatio.asStateFlow()
 
-    private val _focalLength = MutableStateFlow(35) // 35mm, 50mm, 85mm
-    val focalLength: StateFlow<Int> = _focalLength.asStateFlow()
+    // Available physical focal lengths reported by the device's back cameras
+    private val _availableFocalLengths = MutableStateFlow<List<Float>>(listOf(24f, 77f))
+    val availableFocalLengths: StateFlow<List<Float>> = _availableFocalLengths.asStateFlow()
 
     private val _exposure = MutableStateFlow(0f) // -3f to +3f
     val exposure: StateFlow<Float> = _exposure.asStateFlow()
@@ -83,21 +93,63 @@ class CameraViewModel : ViewModel() {
         }
     }
 
-    fun setZoom(ratio: Float) {
-        _zoomRatio.value = ratio.coerceIn(1.0f, 10.0f)
-        // Dynamically calculate focal length label to look cool and professional
-        val computedFocal = (35 + (ratio - 1.0f) * 20).toInt()
-        _focalLength.value = computedFocal
+    /**
+     * Called by CameraPreviewView once the available back-camera focal lengths
+     * are known from the hardware characteristics.
+     */
+    fun setAvailableFocalLengths(lengths: List<Float>) {
+        if (lengths.isNotEmpty() && lengths != _availableFocalLengths.value) {
+            _availableFocalLengths.value = lengths
+            // Recalculate the lens selection for the current target focal length
+            applyLensSelection(_focalLength.value)
+        }
     }
 
+    /**
+     * Pinch-to-zoom gesture handler.
+     * Maps a zoom ratio to a target focal length based on the current base lens.
+     */
+    fun setZoom(ratio: Float) {
+        val clampedRatio = ratio.coerceIn(1.0f, 10.0f)
+        val base = _baseFocalLength.value
+        // Map the zoom ratio to a target focal length
+        val targetFocal = (base * clampedRatio).toInt().coerceIn(24, 200)
+        applyLensSelection(targetFocal)
+    }
+
+    /**
+     * Cycle through lens presets (35mm → 50mm → 85mm → ...)
+     * or select a specific target focal length.
+     */
     fun selectLensPreset(lens: Int) {
-        _focalLength.value = lens
-        _zoomRatio.value = when (lens) {
-            35 -> 1.0f
-            50 -> 1.5f
-            85 -> 2.5f
-            else -> 1.0f
-        }
+        applyLensSelection(lens)
+    }
+
+    /**
+     * Core lens selection algorithm:
+     * 1. Find the best physical lens on the device where f_lens ≤ f_target
+     * 2. Calculate the digital zoom factor Z = f_target / f_lens
+     * 3. Update all state flows accordingly
+     */
+    private fun applyLensSelection(targetFocalLength: Int) {
+        val available = _availableFocalLengths.value
+
+        // Step 1: Find the best physical lens (largest focal length ≤ target)
+        val bestBase = available
+            .filter { it <= targetFocalLength }
+            .maxOrNull()
+            ?: available.minOrNull() // fallback: widest lens
+            ?: 24f
+
+        val baseInt = bestBase.toInt()
+
+        // Step 2: Calculate digital zoom factor
+        val zoom = targetFocalLength.toFloat() / bestBase
+
+        // Step 3: Update state
+        _baseFocalLength.value = baseInt
+        _focalLength.value = targetFocalLength
+        _zoomRatio.value = zoom
     }
 
     fun setExposure(value: Float) {

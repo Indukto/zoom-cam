@@ -1,12 +1,17 @@
+@file:OptIn(ExperimentalCamera2Interop::class)
 package com.example
 
 import android.content.Context
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.Environment
 import android.util.Log
 import android.view.Display
 import android.view.Surface
 import android.view.ViewGroup
 import android.view.WindowManager
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -34,14 +39,109 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
 
+/**
+ * Queries the device's back-facing cameras and returns their 35mm-equivalent
+ * focal lengths sorted ascending.
+ */
+private fun getBackCameraFocalLengths(context: Context): List<Float> {
+    return try {
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val lengths = mutableListOf<Float>()
+        for (cameraId in cameraManager.cameraIdList) {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+            if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                val focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                if (focalLengths != null) {
+                    for (fl in focalLengths) {
+                        // Convert physical focal length to 35mm equivalent.
+                        // We approximate by multiplying with a crop factor derived from
+                        // the sensor physical size vs 35mm (36x24mm).
+                        val sensorSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                        val cropFactor = if (sensorSize != null) {
+                            // 35mm diagonal = sqrt(36^2 + 24^2) ≈ 43.27mm
+                            val sensorDiagonal = kotlin.math.sqrt(
+                                sensorSize.width * sensorSize.width + sensorSize.height * sensorSize.height
+                            )
+                            (43.27 / sensorDiagonal).toFloat()
+                        } else {
+                            1.0f
+                        }
+                        val equivFocal = fl * cropFactor
+                        lengths.add(equivFocal)
+                    }
+                }
+            }
+        }
+        lengths.sorted()
+    } catch (e: Exception) {
+        Log.e("CameraPreviewView", "Error reading camera focal lengths", e)
+        // Fallback to common values if we can't read them
+        listOf(24f, 77f)
+    }
+}
+
+/**
+ * Builds a CameraSelector that targets the back camera whose focal length
+ * best matches the given baseFocalLength. If no exact match is found,
+ * it falls back to the default back camera.
+ */
+private fun buildLensSelector(context: Context, baseFocalLength: Int): CameraSelector {
+    return try {
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        var bestCameraId: String? = null
+        var bestDiff = Float.MAX_VALUE
+
+        for (cameraId in cameraManager.cameraIdList) {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+            if (facing == CameraCharacteristics.LENS_FACING_BACK) {
+                val focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                if (focalLengths != null) {
+                    for (fl in focalLengths) {
+                        val sensorSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                        val cropFactor = if (sensorSize != null) {
+                            val sensorDiagonal = kotlin.math.sqrt(
+                                sensorSize.width * sensorSize.width + sensorSize.height * sensorSize.height
+                            )
+                            (43.27 / sensorDiagonal).toFloat()
+                        } else {
+                            1.0f
+                        }
+                        val equivFocal = fl * cropFactor
+                        val diff = kotlin.math.abs(equivFocal - baseFocalLength)
+                        if (diff < bestDiff) {
+                            bestDiff = diff
+                            bestCameraId = cameraId
+                        }
+                    }
+                }
+            }
+        }
+
+        if (bestCameraId != null) {
+            CameraSelector.Builder().addCameraFilter { cameras ->
+                cameras.filter { Camera2CameraInfo.from(it).cameraId == bestCameraId }
+            }.build()
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+    } catch (e: Exception) {
+        Log.e("CameraPreviewView", "Error building lens selector", e)
+        CameraSelector.DEFAULT_BACK_CAMERA
+    }
+}
+
 @Composable
 fun CameraPreviewView(
     modifier: Modifier = Modifier,
     zoomRatio: Float,
+    baseFocalLength: Int,
     exposure: Float,
     flashMode: Int,
     isFrontCamera: Boolean,
     onZoomChanged: (Float) -> Unit,
+    onAvailableFocalLengths: (List<Float>) -> Unit,
     imageCaptureProvider: (ImageCapture) -> Unit
 ) {
     val context = LocalContext.current
@@ -76,8 +176,15 @@ fun CameraPreviewView(
         imageCaptureProvider(imageCapture)
     }
 
+    // Read available back-camera focal lengths once and report to ViewModel
+    LaunchedEffect(Unit) {
+        val lengths = getBackCameraFocalLengths(context)
+        onAvailableFocalLengths(lengths)
+    }
+
     // Apply CameraX lifecycle state updates
-    LaunchedEffect(isFrontCamera, cameraProviderFuture) {
+    // Re-bind when isFrontCamera or baseFocalLength changes
+    LaunchedEffect(isFrontCamera, baseFocalLength, cameraProviderFuture) {
         val executor = ContextCompat.getMainExecutor(context)
         cameraProviderFuture.addListener({
             try {
@@ -89,7 +196,8 @@ fun CameraPreviewView(
                 val cameraSelector = if (isFrontCamera) {
                     CameraSelector.DEFAULT_FRONT_CAMERA
                 } else {
-                    CameraSelector.DEFAULT_BACK_CAMERA
+                    // Select the physical lens closest to our base focal length
+                    buildLensSelector(context, baseFocalLength)
                 }
 
                 cameraProvider.unbindAll()
@@ -105,13 +213,13 @@ fun CameraPreviewView(
         }, executor)
     }
 
-    // Dynamically apply Zoom controls (Locked to 1.0f wide-angle rangefinder view)
-    LaunchedEffect(camera) {
+    // Apply the digital zoom ratio to the camera preview
+    LaunchedEffect(camera, zoomRatio) {
         val activeCamera = camera ?: return@LaunchedEffect
         try {
-            activeCamera.cameraControl.setZoomRatio(1.0f)
+            activeCamera.cameraControl.setZoomRatio(zoomRatio)
         } catch (e: Exception) {
-            Log.e("CameraPreviewView", "Error resetting zoom to wide-angle", e)
+            Log.e("CameraPreviewView", "Error setting zoom ratio", e)
         }
     }
 
