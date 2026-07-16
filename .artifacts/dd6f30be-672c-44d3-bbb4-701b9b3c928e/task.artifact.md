@@ -1,0 +1,2 @@
+- [x] Remove `debugConfig` from `app/build.gradle.kts`
+- [x] Verify build with `./gradlew :app:assembleDebug`
