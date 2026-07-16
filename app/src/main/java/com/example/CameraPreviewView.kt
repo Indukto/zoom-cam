@@ -15,7 +15,10 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -60,7 +63,7 @@ fun CameraPreviewView(
     }
 
     // Capture state references
-    var camera: Camera? = remember { null }
+    var camera by remember { mutableStateOf<Camera?>(null) }
 
     // Keep parent informed of our active ImageCapture instance
     LaunchedEffect(imageCapture) {
@@ -69,37 +72,40 @@ fun CameraPreviewView(
 
     // Apply CameraX lifecycle state updates
     LaunchedEffect(isFrontCamera, cameraProviderFuture) {
-        val cameraProvider = cameraProviderFuture.get()
-        val preview = Preview.Builder().build().apply {
-            setSurfaceProvider(previewView.surfaceProvider)
-        }
+        val executor = ContextCompat.getMainExecutor(context)
+        cameraProviderFuture.addListener({
+            try {
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build().apply {
+                    setSurfaceProvider(previewView.surfaceProvider)
+                }
 
-        val cameraSelector = if (isFrontCamera) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
+                val cameraSelector = if (isFrontCamera) {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                } else {
+                    CameraSelector.DEFAULT_BACK_CAMERA
+                }
 
-        try {
-            cameraProvider.unbindAll()
-            camera = cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview,
-                imageCapture
-            )
-        } catch (e: Exception) {
-            Log.e("CameraPreviewView", "Failed to bind camera lifecycle", e)
-        }
+                cameraProvider.unbindAll()
+                camera = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    preview,
+                    imageCapture
+                )
+            } catch (e: Exception) {
+                Log.e("CameraPreviewView", "Failed to bind camera lifecycle", e)
+            }
+        }, executor)
     }
 
-    // Dynamically apply Zoom controls
-    LaunchedEffect(zoomRatio, camera) {
+    // Dynamically apply Zoom controls (Locked to 1.0f wide-angle rangefinder view)
+    LaunchedEffect(camera) {
         val activeCamera = camera ?: return@LaunchedEffect
         try {
-            activeCamera.cameraControl.setZoomRatio(zoomRatio)
+            activeCamera.cameraControl.setZoomRatio(1.0f)
         } catch (e: Exception) {
-            Log.e("CameraPreviewView", "Error adjusting zoom", e)
+            Log.e("CameraPreviewView", "Error resetting zoom to wide-angle", e)
         }
     }
 

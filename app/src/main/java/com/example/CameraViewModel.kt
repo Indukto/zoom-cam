@@ -140,7 +140,13 @@ class CameraViewModel : ViewModel() {
         }
     }
 
-    fun processAndSavePhoto(context: Context, rawFile: File) {
+    fun processAndSavePhoto(
+        context: Context,
+        rawFile: File,
+        boxWidthFraction: Float,
+        screenWidth: Float,
+        screenHeight: Float
+    ) {
         _isCapturing.value = true
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -151,10 +157,8 @@ class CameraViewModel : ViewModel() {
                 var bitmap = BitmapFactory.decodeFile(rawFile.absolutePath, options)
 
                 if (bitmap != null) {
-                    // Check if we need to rotate/flip the image based on camera selection
+                    // 1. Check if we need to rotate/flip the image based on camera selection
                     val matrix = Matrix()
-                    
-                    // Front camera images are usually mirrored, we can mirror it here if desired
                     if (_isFrontCamera.value) {
                         matrix.postScale(-1f, 1f)
                     }
@@ -167,20 +171,32 @@ class CameraViewModel : ViewModel() {
                         bitmap = rotatedBitmap
                     }
 
-                    // Apply the retro adjustments (exposure, temperature, vignette)
-                    val processedBitmap = bitmap.applyRetroFilter(_temperature.value, _exposure.value)
+                    // 2. Crop the image to the exact Zoom Box bounds visible on screen
+                    val croppedBitmap = try {
+                        cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight)
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Error cropping bitmap, fallback to full image", e)
+                        bitmap
+                    }
+
+                    if (croppedBitmap != bitmap) {
+                        bitmap.recycle()
+                    }
+
+                    // 3. Apply the retro adjustments (exposure, temperature, vignette) on the cropped result
+                    val processedBitmap = croppedBitmap.applyRetroFilter(_temperature.value, _exposure.value)
 
                     // Overwrite the original file with processed retro photo
                     FileOutputStream(rawFile).use { out ->
                         processedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
                     }
                     processedBitmap.recycle()
-                    if (bitmap != processedBitmap) {
-                        bitmap.recycle()
+                    if (croppedBitmap != processedBitmap) {
+                        croppedBitmap.recycle()
                     }
                 }
 
-                // Delete raw temporary file if needed, but since rawFile is where we saved, we just reload
+                // Reload photo gallery
                 loadPhotos(context)
             } catch (e: Exception) {
                 Log.e("CameraViewModel", "Error processing captured photo", e)
@@ -188,6 +204,38 @@ class CameraViewModel : ViewModel() {
                 _isCapturing.value = false
             }
         }
+    }
+
+    private fun cropBitmapToZoomBox(
+        bitmap: Bitmap,
+        boxWidthFraction: Float,
+        screenWidth: Float,
+        screenHeight: Float
+    ): Bitmap {
+        val wBitmap = bitmap.width.toFloat()
+        val hBitmap = bitmap.height.toFloat()
+
+        // Calculate how the PreviewView (FILL_CENTER) is scaled on the screen
+        val scale = kotlin.math.max(screenWidth / wBitmap, screenHeight / hBitmap)
+        val wVisible = screenWidth / scale
+        val hVisible = screenHeight / scale
+
+        val xVisibleStart = (wBitmap - wVisible) / 2f
+        val yVisibleStart = (hBitmap - hVisible) / 2f
+
+        // Locate the Zoom Box on the screen
+        val wBox = screenWidth * boxWidthFraction
+        val hBox = wBox * 1.35f
+        val xBox = (screenWidth - wBox) / 2f
+        val yBox = (screenHeight - hBox) / 2.3f
+
+        // Map screen Zoom Box to Bitmap coordinates
+        val xCropStart = (xVisibleStart + (xBox / screenWidth) * wVisible).toInt().coerceIn(0, bitmap.width - 1)
+        val yCropStart = (yVisibleStart + (yBox / screenHeight) * hVisible).toInt().coerceIn(0, bitmap.height - 1)
+        val wCrop = ((wBox / screenWidth) * wVisible).toInt().coerceIn(1, bitmap.width - xCropStart)
+        val hCrop = ((hBox / screenHeight) * hVisible).toInt().coerceIn(1, bitmap.height - yCropStart)
+
+        return Bitmap.createBitmap(bitmap, xCropStart, yCropStart, wCrop, hCrop)
     }
 
     fun deletePhoto(context: Context, file: File) {

@@ -279,8 +279,8 @@ fun CameraActiveScreen(
             )
         }
 
-        // Dynamic box scale based on the zoomRatio
-        val targetFraction = (0.85f - (zoomRatio - 1.0f) * 0.08f).coerceIn(0.5f, 0.85f)
+        // Dynamic box scale based on the target focal length relative to base 35mm view
+        val targetFraction = (0.85f * (35f / focalLength.toFloat())).coerceIn(0.15f, 0.95f)
         val animatedBoxWidthFraction by animateFloatAsState(
             targetValue = targetFraction,
             animationSpec = spring(stiffness = 200f, dampingRatio = 0.75f),
@@ -627,7 +627,13 @@ fun CameraActiveScreen(
                                     executor = cameraExecutor,
                                     onCaptured = { rawFile ->
                                         flashFlashActive = false
-                                        viewModel.processAndSavePhoto(context, rawFile)
+                                        viewModel.processAndSavePhoto(
+                                            context = context,
+                                            rawFile = rawFile,
+                                            boxWidthFraction = animatedBoxWidthFraction,
+                                            screenWidth = totalWidth.value,
+                                            screenHeight = totalHeight.value
+                                        )
                                     },
                                     onCaptureError = { exc ->
                                         flashFlashActive = false
