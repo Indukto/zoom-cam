@@ -308,37 +308,33 @@ fun CameraActiveScreen(
             }
         }
 
-        // 3. Zoom Box outline with focal length label above
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
+        // 3a. Focal length label — positioned independently above the zoom box
+        val boxTopOffset = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f + 6).dp
+        Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f - 18).dp)
+                .offset(y = boxTopOffset - 32.dp),
+            contentAlignment = Alignment.Center
         ) {
-            // Focal length label in white above the box with fixed height container to lock vertical layout calculations
-            Box(
-                modifier = Modifier.height(18.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "${focalLength}mm",
-                    fontSize = 13.sp,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
+            Text(
+                text = "${focalLength}mm",
+                fontSize = 13.sp,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(animatedBoxWidthFraction)
-                    .aspectRatio(1f / 1.35f)
-                    .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
-            ) {
-                // Empty zoom box — clean framing only
-            }
+        // 3b. Zoom Box outline
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset(y = boxTopOffset)
+                .fillMaxWidth(animatedBoxWidthFraction)
+                .aspectRatio(1f / 1.35f)
+                .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
+        ) {
+            // Empty zoom box — clean framing only
         }
 
         // 4. Compact Floating Capsule Controls below the Zoom Box

@@ -165,6 +165,17 @@ class CameraViewModel : ViewModel() {
                 var bitmap = BitmapFactory.decodeFile(rawFile.absolutePath, options)
 
                 if (bitmap != null) {
+                    // Capture original EXIF values before processing (Bitmap.compress strips them)
+                    var originalExposureTime = 0.0
+                    var originalIso = 0
+                    try {
+                        val origExif = ExifInterface(rawFile.absolutePath)
+                        originalExposureTime = origExif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0)
+                        originalIso = origExif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Error reading original EXIF", e)
+                    }
+
                     // 1. Read EXIF orientation and rotate/flip accordingly
                     val matrix = Matrix()
                     try {
@@ -236,6 +247,21 @@ class CameraViewModel : ViewModel() {
                     val newName = "${focalName}_${captureFocalLength}mm.$focalExt"
                     val renamedFile = File(focalDir, newName)
                     rawFile.renameTo(renamedFile)
+
+                    // 5. Write back EXIF data (Bitmap.compress strips it)
+                    try {
+                        val exifOut = ExifInterface(renamedFile.absolutePath)
+                        if (originalExposureTime > 0.0) {
+                            exifOut.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, originalExposureTime.toString())
+                        }
+                        if (originalIso > 0) {
+                            exifOut.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, originalIso.toString())
+                        }
+                        exifOut.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "${captureFocalLength}.0")
+                        exifOut.saveAttributes()
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Error writing EXIF data back", e)
+                    }
                 }
 
                 // Reload photo gallery
