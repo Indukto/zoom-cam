@@ -294,7 +294,8 @@ fun CameraActiveScreen(
             val boxW = size.width * animatedBoxWidthFraction
             val boxH = boxW * 1.35f // Retro 4:3 style framing box aspect
             val left = (size.width - boxW) / 2f
-            val top = (size.height - boxH) / 2.3f
+            // Adjust the top coordinate to match the exact actual rendered position of the white box
+            val top = (size.height - boxH) / 2.3f + 6.dp.toPx()
 
             val rect = Rect(left, top, left + boxW, top + boxH)
             val path = Path().apply {
@@ -314,14 +315,19 @@ fun CameraActiveScreen(
                 .align(Alignment.TopCenter)
                 .offset(y = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f - 18).dp)
         ) {
-            // Focal length label in white above the box
-            Text(
-                text = "${focalLength}mm",
-                fontSize = 13.sp,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
+            // Focal length label in white above the box with fixed height container to lock vertical layout calculations
+            Box(
+                modifier = Modifier.height(18.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "${focalLength}mm",
+                    fontSize = 13.sp,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
 
             Spacer(modifier = Modifier.height(6.dp))
 
@@ -339,7 +345,7 @@ fun CameraActiveScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = (((totalHeight.value - (totalWidth.value * 0.85f * 1.35f)) / 2.3f) + (totalWidth.value * 0.85f * 1.35f) + 16).dp)
+                .offset(y = (((totalHeight.value - (totalWidth.value * 0.85f * 1.35f)) / 2.3f + 6) + (totalWidth.value * 0.85f * 1.35f) + 16).dp)
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
