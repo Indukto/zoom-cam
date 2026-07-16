@@ -8,6 +8,9 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.lifecycle.LifecycleOwner
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -94,11 +97,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
@@ -236,9 +241,15 @@ fun CameraActiveScreen(
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     // Create executors for CameraX operations
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val mainExecutor = ContextCompat.getMainExecutor(context)
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+
+    // Refs for captureWithBestLens (camera provider + surface provider)
+    // These are provided by CameraPreviewView via the onLensCaptureReady callback
+    var lensCaptureHandle by remember { mutableStateOf<LensCaptureHandle?>(null) }
 
     // Floating UI flash visual effect
     var flashFlashActive by remember { mutableStateOf(false) }
@@ -257,16 +268,18 @@ fun CameraActiveScreen(
         val totalHeight = maxHeight
 
         // 1. Camera Viewfinder Background
+        // The preview always shows the full wide-angle view (no lens switching, no zoom).
+        // The zoom box overlay shows the crop area for the selected focal length.
         CameraPreviewView(
             modifier = Modifier.fillMaxSize(),
             zoomRatio = zoomRatio,
-            baseFocalLength = baseFocalLength,
             exposure = exposure,
             flashMode = flashMode,
             isFrontCamera = isFrontCamera,
             onZoomChanged = { viewModel.setZoom(it) },
             onAvailableFocalLengths = { viewModel.setAvailableFocalLengths(it) },
-            imageCaptureProvider = { activeImageCapture = it }
+            imageCaptureProvider = { activeImageCapture = it },
+            onLensCaptureReady = { handle -> lensCaptureHandle = handle }
         )
 
         // Color overlay to simulate warming / cooling retro tint on preview dynamically
@@ -606,26 +619,70 @@ fun CameraActiveScreen(
                                 // Trigger brief flash screen feedback
                                 flashFlashActive = true
 
-                                triggerImageCapture(
-                                    context = context,
-                                    imageCapture = captureDevice,
-                                    executor = cameraExecutor,
-                                    onCaptured = { rawFile ->
-                                        flashFlashActive = false
-                                        viewModel.processAndSavePhoto(
-                                            context = context,
-                                            rawFile = rawFile,
-                                            boxWidthFraction = animatedBoxWidthFraction,
-                                            screenWidth = totalWidth.value,
-                                            screenHeight = totalHeight.value,
-                                            captureFocalLength = focalLength
-                                        )
-                                    },
-                                    onCaptureError = { exc ->
-                                        flashFlashActive = false
-                                        Log.e("CameraActiveScreen", "Capture failed", exc)
-                                    }
-                                )
+                                // Use the best lens for capture: unbind the wide-angle,
+                                // bind the target lens, capture, then rebind wide-angle.
+                                val handle = lensCaptureHandle
+
+                                if (handle != null) {
+                                    captureWithBestLens(
+                                        context = context,
+                                        cameraProvider = handle.cameraProvider,
+                                        lifecycleOwner = lifecycleOwner,
+                                        baseFocalLength = baseFocalLength,
+                                        targetFocalLength = focalLength,
+                                        flashMode = flashMode,
+                                        surfaceProvider = handle.surfaceProvider,
+                                        isFrontCamera = isFrontCamera,
+                                        executor = mainExecutor,
+                                        rebindPreview = {
+                                            // After capture, rebind the wide-angle preview
+                                            rebindDefaultCamera(
+                                                cameraProvider = handle.cameraProvider,
+                                                lifecycleOwner = lifecycleOwner,
+                                                surfaceProvider = handle.surfaceProvider,
+                                                isFrontCamera = isFrontCamera,
+                                                imageCapture = captureDevice
+                                            )
+                                        },
+                                        onCaptured = { rawFile ->
+                                            flashFlashActive = false
+                                            viewModel.processAndSavePhoto(
+                                                context = context,
+                                                rawFile = rawFile,
+                                                boxWidthFraction = animatedBoxWidthFraction,
+                                                screenWidth = totalWidth.value,
+                                                screenHeight = totalHeight.value,
+                                                captureFocalLength = focalLength
+                                            )
+                                        },
+                                        onCaptureError = { exc ->
+                                            flashFlashActive = false
+                                            Log.e("CameraActiveScreen", "Capture failed", exc)
+                                        }
+                                    )
+                                } else {
+                                    // Fallback: just use the currently bound imageCapture
+                                    triggerImageCapture(
+                                        context = context,
+                                        imageCapture = captureDevice,
+                                        executor = mainExecutor,
+                                        onCaptured = { rawFile ->
+                                            flashFlashActive = false
+                                            viewModel.processAndSavePhoto(
+                                                context = context,
+                                                rawFile = rawFile,
+                                                boxWidthFraction = animatedBoxWidthFraction,
+                                                screenWidth = totalWidth.value,
+                                                screenHeight = totalHeight.value,
+                                                captureFocalLength = focalLength
+                                            )
+                                        },
+                                        onCaptureError = { exc ->
+                                            flashFlashActive = false
+                                            Log.e("CameraActiveScreen", "Capture failed", exc)
+                                        }
+                                    )
+                                }
                             }
                         },
                     contentAlignment = Alignment.Center
