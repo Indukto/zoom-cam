@@ -72,6 +72,12 @@ class CameraViewModel : ViewModel() {
     private val _isCapturing = MutableStateFlow(false)
     val isCapturing: StateFlow<Boolean> = _isCapturing.asStateFlow()
 
+    private val _showGridLines = MutableStateFlow(false)
+    val showGridLines: StateFlow<Boolean> = _showGridLines.asStateFlow()
+
+    private val _aspectRatio = MutableStateFlow("4:3") // "4:3" or "1:1"
+    val aspectRatio: StateFlow<String> = _aspectRatio.asStateFlow()
+
     private val shutterSound = MediaActionSound()
 
     init {
@@ -168,6 +174,16 @@ class CameraViewModel : ViewModel() {
         _isFrontCamera.value = !_isFrontCamera.value
     }
 
+    fun toggleGridLines() {
+        _showGridLines.value = !_showGridLines.value
+    }
+
+    fun setAspectRatio(ratio: String) {
+        if (ratio == "4:3" || ratio == "1:1") {
+            _aspectRatio.value = ratio
+        }
+    }
+
     fun setSelectedPhoto(file: File?) {
         _selectedPhoto.value = file
     }
@@ -208,6 +224,7 @@ class CameraViewModel : ViewModel() {
         captureFocalLength: Int
     ) {
         _isCapturing.value = true
+        val currentAspectRatioMultiplier = if (_aspectRatio.value == "1:1") 1.0f else 1.35f
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Decode captured image
@@ -270,7 +287,7 @@ class CameraViewModel : ViewModel() {
 
                     // 2. Crop the image to the exact Zoom Box bounds visible on screen
                     val croppedBitmap = try {
-                        cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight)
+                        cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
                     } catch (e: Exception) {
                         Log.e("CameraViewModel", "Error cropping bitmap, fallback to full image", e)
                         bitmap
@@ -365,7 +382,8 @@ class CameraViewModel : ViewModel() {
         bitmap: Bitmap,
         boxWidthFraction: Float,
         screenWidth: Float,
-        screenHeight: Float
+        screenHeight: Float,
+        aspectRatioMultiplier: Float
     ): Bitmap {
         val wBitmap = bitmap.width.toFloat()
         val hBitmap = bitmap.height.toFloat()
@@ -380,7 +398,7 @@ class CameraViewModel : ViewModel() {
 
         // Locate the Zoom Box on the screen
         val wBox = screenWidth * boxWidthFraction
-        val hBox = wBox * 1.35f
+        val hBox = wBox * aspectRatioMultiplier
         val xBox = (screenWidth - wBox) / 2f
         val yBox = (screenHeight - hBox) / 2.3f + 6f
 

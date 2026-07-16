@@ -29,4 +29,15 @@ class GreetingScreenshotTest {
 
     composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
   }
+
+  @Test
+  fun camera_active_screen_screenshot() {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        CameraActiveScreen(viewModel = CameraViewModel())
+      }
+    }
+
+    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/camera_active_screen.png")
+  }
 }
