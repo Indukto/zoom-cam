@@ -1,2 +1,2 @@
-- [x] Remove `debugConfig` from `app/build.gradle.kts`
-- [x] Verify build with `./gradlew :app:assembleDebug`
+- [x] Create `README.md` with project details and setup instructions
+- [x] Verify `README.md` content

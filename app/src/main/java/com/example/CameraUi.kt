@@ -566,14 +566,16 @@ fun CameraActiveScreen(
                 .padding(bottom = 36.dp, top = 20.dp)
                 .padding(horizontal = 24.dp)
         ) {
-            Row(
+            // Use a centered Box so the shutter sits perfectly in the middle,
+            // with the gallery pinned left and flash/flip pinned right.
+            Box(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                contentAlignment = Alignment.Center
             ) {
                 // Left: Instant circular polaroid gallery button
                 Box(
                     modifier = Modifier
+                        .align(Alignment.CenterStart)
                         .size(54.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color(0xFF1E1E1E))
@@ -659,6 +661,7 @@ fun CameraActiveScreen(
 
                 // Right: Row for Camera Flip & Flash triggers
                 Row(
+                    modifier = Modifier.align(Alignment.CenterEnd),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {

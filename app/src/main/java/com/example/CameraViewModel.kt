@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.MediaActionSound
+import android.media.ExifInterface
 import android.os.Environment
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -157,8 +158,34 @@ class CameraViewModel : ViewModel() {
                 var bitmap = BitmapFactory.decodeFile(rawFile.absolutePath, options)
 
                 if (bitmap != null) {
-                    // 1. Check if we need to rotate/flip the image based on camera selection
+                    // 1. Read EXIF orientation and rotate/flip accordingly
                     val matrix = Matrix()
+                    try {
+                        val exif = ExifInterface(rawFile.absolutePath)
+                        val orientation = exif.getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL
+                        )
+                        when (orientation) {
+                            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                                matrix.postRotate(90f)
+                                matrix.postScale(-1f, 1f)
+                            }
+                            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                                matrix.postRotate(270f)
+                                matrix.postScale(-1f, 1f)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Error reading EXIF orientation", e)
+                    }
+
+                    // Mirror the image if using front camera
                     if (_isFrontCamera.value) {
                         matrix.postScale(-1f, 1f)
                     }

@@ -3,7 +3,10 @@ package com.example
 import android.content.Context
 import android.os.Environment
 import android.util.Log
+import android.view.Display
+import android.view.Surface
 import android.view.ViewGroup
+import android.view.WindowManager
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -57,8 +60,11 @@ fun CameraPreviewView(
     }
 
     val imageCapture = remember {
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val rotation = windowManager.defaultDisplay.rotation
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setTargetRotation(rotation)
             .build()
     }
 
