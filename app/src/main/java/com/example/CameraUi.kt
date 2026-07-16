@@ -236,6 +236,9 @@ fun CameraActiveScreen(
     val isFrontCamera by viewModel.isFrontCamera.collectAsState()
     val capturedPhotos by viewModel.capturedPhotos.collectAsState()
     val selectedPhoto by viewModel.selectedPhoto.collectAsState()
+    val boxScale by viewModel.boxScale.collectAsState()
+    val previewLensRole by viewModel.previewLensRole.collectAsState()
+    val captureLensRole by viewModel.captureLensRole.collectAsState()
 
     val showTempSlider by viewModel.showTemperatureSlider.collectAsState()
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
@@ -295,12 +298,10 @@ fun CameraActiveScreen(
             )
         }
 
-        // Dynamic box scale based on the target focal length relative to the actual physical lens
-        // The box shows the crop area: box_width = screen_width * (f_base / f_target)
-        // Starting with a max visible fraction of 0.85 at 1:1 zoom
-        val targetFraction = (0.85f * (baseFocalLength.toFloat() / focalLength.toFloat())).coerceIn(0.15f, 0.85f)
+        // Box scale from FovMapper: previewFocalMm / targetFocalMm
+        // Represents the fraction of the viewfinder covered by the zoom box
         val animatedBoxWidthFraction by animateFloatAsState(
-            targetValue = targetFraction,
+            targetValue = boxScale,
             animationSpec = spring(stiffness = 200f, dampingRatio = 0.75f),
             label = "box_width_fraction"
         )

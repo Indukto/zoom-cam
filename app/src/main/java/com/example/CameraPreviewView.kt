@@ -4,7 +4,6 @@ package com.example
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-import android.os.Environment
 import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -32,6 +31,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.zoom.LensCatalog
+import com.example.zoom.LensRole
+import com.example.zoom.PreviewSessionManager
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -47,67 +49,44 @@ data class LensCaptureHandle(
     val surfaceProvider: Preview.SurfaceProvider
 )
 
+/**
+ * Uses LensCatalog to enumerate cameras with proper crop-factor computation,
+ * matching the architecture spec §5.1 (LensCatalog) and §9 (physical camera targeting).
+ */
 private fun getBackCameraFocalLengths(context: Context): List<Float> {
     return try {
-        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val lengths = mutableListOf<Float>()
-        for (cameraId in cameraManager.cameraIdList) {
-            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
-            if (facing == CameraCharacteristics.LENS_FACING_BACK) {
-                val focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                if (focalLengths != null) {
-                    for (fl in focalLengths) {
-                        val sensorSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-                        val cropFactor = if (sensorSize != null) {
-                            val sensorDiagonal = kotlin.math.sqrt(
-                                sensorSize.width * sensorSize.width + sensorSize.height * sensorSize.height
-                            )
-                            (43.27 / sensorDiagonal).toFloat()
-                        } else 1.0f
-                        lengths.add(fl * cropFactor)
-                    }
-                }
-            }
-        }
-        lengths.sorted()
+        val catalog = LensCatalog(context)
+        val result = catalog.enumerate()
+        result.allLenses.map { it.equivFocalMm }.sorted()
     } catch (e: Exception) {
-        Log.e("CameraPreviewView", "Error reading camera focal lengths", e)
+        Log.e("CameraPreviewView", "Error reading camera focal lengths via LensCatalog", e)
         listOf(24f, 77f)
     }
 }
 
+/**
+ * Builds a CameraSelector for a specific physical camera, matching the
+ * architecture spec §9: uses Camera2Interop.Extender.setPhysicalCameraId().
+ */
 fun buildCameraSelectorForLens(context: Context, baseFocalLength: Int): CameraSelector {
     return try {
-        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        var bestCameraId: String? = null
-        var bestDiff = Float.MAX_VALUE
-        for (cameraId in cameraManager.cameraIdList) {
-            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
-            if (facing == CameraCharacteristics.LENS_FACING_BACK) {
-                val focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                if (focalLengths != null) {
-                    for (fl in focalLengths) {
-                        val sensorSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-                        val cropFactor = if (sensorSize != null) {
-                            val sensorDiagonal = kotlin.math.sqrt(
-                                sensorSize.width * sensorSize.width + sensorSize.height * sensorSize.height
-                            )
-                            (43.27 / sensorDiagonal).toFloat()
-                        } else 1.0f
-                        val equivFocal = fl * cropFactor
-                        val diff = kotlin.math.abs(equivFocal - baseFocalLength)
-                        if (diff < bestDiff) { bestDiff = diff; bestCameraId = cameraId }
-                    }
-                }
-            }
+        val catalog = LensCatalog(context)
+        val result = catalog.enumerate()
+
+        // Find the lens whose equivFocalMm is closest to baseFocalLength
+        val targetLens = result.allLenses.minByOrNull {
+            kotlin.math.abs(it.equivFocalMm - baseFocalLength)
         }
-        if (bestCameraId != null) {
-            CameraSelector.Builder().addCameraFilter { cameras ->
-                cameras.filter { Camera2CameraInfo.from(it).cameraId == bestCameraId }
-            }.build()
-        } else CameraSelector.DEFAULT_BACK_CAMERA
+
+        if (targetLens != null) {
+            CameraSelector.Builder()
+                .addCameraFilter { cameras ->
+                    cameras.filter { Camera2CameraInfo.from(it).cameraId == targetLens.physicalCameraId }
+                }
+                .build()
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
     } catch (e: Exception) {
         Log.e("CameraPreviewView", "Error building lens selector", e)
         CameraSelector.DEFAULT_BACK_CAMERA
@@ -117,6 +96,8 @@ fun buildCameraSelectorForLens(context: Context, baseFocalLength: Int): CameraSe
 /**
  * Temporarily switches to the target lens, captures one photo at full quality,
  * then rebinds the original wide-angle camera so the preview resumes.
+ *
+ * Updated to use LensCatalog for proper physical camera targeting.
  */
 fun captureWithBestLens(
     context: Context,
@@ -153,7 +134,7 @@ fun captureWithBestLens(
         }
         .build()
 
-    val directory = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.cacheDir
+    val directory = context.getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES) ?: context.cacheDir
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     val photoFile = File(directory, "RETRO_IMG_${timeStamp}_${targetFocalLength}mm.jpg")
     val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
@@ -248,21 +229,47 @@ fun CameraPreviewView(
         }
     }
 
+    // Enumerate cameras using LensCatalog for proper physical camera IDs
     LaunchedEffect(Unit) {
         val lengths = getBackCameraFocalLengths(context)
         onAvailableFocalLengths(lengths)
     }
 
+    // Bind camera with physical camera targeting support
     LaunchedEffect(isFrontCamera, cameraProviderFuture) {
         val executor = ContextCompat.getMainExecutor(context)
         cameraProviderFuture.addListener({
             try {
                 val cp = cameraProviderFuture.get()
                 cameraProviderRef = cp
+
+                val previewManager = PreviewSessionManager(context, lifecycleOwner)
                 val preview = Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) }
-                val cs = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-                cp.unbindAll()
-                camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
+
+                if (isFrontCamera) {
+                    val cs = CameraSelector.DEFAULT_FRONT_CAMERA
+                    cp.unbindAll()
+                    camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
+                } else {
+                    // Use PreviewSessionManager for back camera to enable physical camera targeting
+                    // Enumerate to find the primary back camera
+                    val catalog = LensCatalog(context)
+                    val result = catalog.enumerate()
+                    val primaryLens = result.primary
+                    if (primaryLens != null) {
+                        camera = previewManager.bindPreview(
+                            cameraProvider = cp,
+                            physicalCameraId = primaryLens.physicalCameraId,
+                            surfaceProvider = previewView.surfaceProvider,
+                            imageCapture = imageCapture,
+                            flashMode = flashMode
+                        )
+                    } else {
+                        val cs = CameraSelector.DEFAULT_BACK_CAMERA
+                        cp.unbindAll()
+                        camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("CameraPreviewView", "Failed to bind camera lifecycle", e)
             }
@@ -321,7 +328,7 @@ fun triggerImageCapture(
     onCaptured: (File) -> Unit,
     onCaptureError: (ImageCaptureException) -> Unit
 ) {
-    val directory = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.cacheDir
+    val directory = context.getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES) ?: context.cacheDir
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     val photoFile = File(directory, "RETRO_IMG_$timeStamp.jpg")
     val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
