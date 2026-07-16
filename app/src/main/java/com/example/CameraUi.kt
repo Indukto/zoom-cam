@@ -305,56 +305,32 @@ fun CameraActiveScreen(
             }
         }
 
-        // 3. Zoom Box outline, dynamic top label, and date stamp inside
-        Box(
+        // 3. Zoom Box outline with focal length label above
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
-                .fillMaxWidth(animatedBoxWidthFraction)
-                .aspectRatio(1f / 1.35f)
                 .align(Alignment.TopCenter)
-                .offset(y = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f).dp)
-                .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
+                .offset(y = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f - 18).dp)
         ) {
-            // Top straddled active focal length label badge
+            // Focal length label in white above the box
+            Text(
+                text = "${focalLength}mm",
+                fontSize = 13.sp,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset(y = (-11).dp)
-                    .background(Color.White, RoundedCornerShape(12.dp))
-                    .border(1.dp, Color.Black.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 14.dp, vertical = 2.dp)
+                    .fillMaxWidth(animatedBoxWidthFraction)
+                    .aspectRatio(1f / 1.35f)
+                    .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
             ) {
-                Text(
-                    text = "${focalLength}mm",
-                    fontSize = 11.sp,
-                    color = Color.Black,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
+                // Empty zoom box — clean framing only
             }
-
-            // Subtitle inside the Zoom Box
-            Text(
-                text = "CPM ${focalLength}",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Color.White.copy(alpha = 0.5f),
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 36.dp)
-            )
-
-            // Film-style Retro Watermark stamp in corner (e.g. orange glowing segmented numbers)
-            Text(
-                text = "JUL 16 2026",
-                fontSize = 12.sp,
-                color = Color(0xFFF97316), // Glowing retro analog stamp orange
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp)
-            )
         }
 
         // 4. Compact Floating Capsule Controls below the Zoom Box
