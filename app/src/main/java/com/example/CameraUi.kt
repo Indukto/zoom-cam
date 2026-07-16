@@ -53,6 +53,7 @@ import androidx.compose.material.icons.rounded.FlashOff
 import androidx.compose.material.icons.rounded.FlashOn
 import androidx.compose.material.icons.rounded.FlipCameraAndroid
 import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.WbSunny
@@ -60,6 +61,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -235,6 +238,10 @@ fun CameraActiveScreen(
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
 
+    val showGridLines by viewModel.showGridLines.collectAsState()
+    val aspectRatioSetting by viewModel.aspectRatio.collectAsState()
+    var showSettingsMenu by remember { mutableStateOf(false) }
+
     // Create executors for CameraX operations
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
@@ -254,6 +261,7 @@ fun CameraActiveScreen(
     ) {
         val totalWidth = maxWidth
         val totalHeight = maxHeight
+        val aspectRatioMultiplier = if (aspectRatioSetting == "1:1") 1.0f else 1.35f
 
         // 1. Camera Viewfinder Background
         CameraPreviewView(
@@ -292,7 +300,7 @@ fun CameraActiveScreen(
         // 2. Cinematic Translucent Viewfinder Mask (Darkening outside the Zoom Box)
         Canvas(modifier = Modifier.fillMaxSize()) {
             val boxW = size.width * animatedBoxWidthFraction
-            val boxH = boxW * 1.35f // Retro 4:3 style framing box aspect
+            val boxH = boxW * aspectRatioMultiplier // Retro framing box aspect
             val left = (size.width - boxW) / 2f
             // Adjust the top coordinate to match the exact actual rendered position of the white box
             val top = (size.height - boxH) / 2.3f + 6.dp.toPx()
@@ -309,7 +317,7 @@ fun CameraActiveScreen(
         }
 
         // 3a. Focal length label — positioned independently above the zoom box
-        val boxTopOffset = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f + 6).dp
+        val boxTopOffset = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * aspectRatioMultiplier)) / 2.3f + 6).dp
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -331,17 +339,123 @@ fun CameraActiveScreen(
                 .align(Alignment.TopCenter)
                 .offset(y = boxTopOffset)
                 .fillMaxWidth(animatedBoxWidthFraction)
-                .aspectRatio(1f / 1.35f)
+                .aspectRatio(1f / aspectRatioMultiplier)
                 .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
         ) {
-            // Empty zoom box — clean framing only
+            // Empty zoom box — clean framing only, with optional grid lines inside
+            if (showGridLines) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(20.dp))
+                ) {
+                    val width = size.width
+                    val height = size.height
+
+                    // Draw vertical grid lines at 1/3 and 2/3 width
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.3f),
+                        start = Offset(width / 3f, 0f),
+                        end = Offset(width / 3f, height),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.3f),
+                        start = Offset(2f * width / 3f, 0f),
+                        end = Offset(2f * width / 3f, height),
+                        strokeWidth = 1.dp.toPx()
+                    )
+
+                    // Draw horizontal grid lines at 1/3 and 2/3 height
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.3f),
+                        start = Offset(0f, height / 3f),
+                        end = Offset(width, height / 3f),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.3f),
+                        start = Offset(0f, 2f * height / 3f),
+                        end = Offset(width, 2f * height / 3f),
+                        strokeWidth = 1.dp.toPx()
+                    )
+                }
+            }
+        }
+
+        // 3c. 3-point settings menu button in the top right
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 48.dp, end = 16.dp)
+        ) {
+            IconButton(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    showSettingsMenu = !showSettingsMenu
+                },
+                colors = IconButtonDefaults.iconButtonColors(
+                    containerColor = Color.Black.copy(alpha = 0.5f),
+                    contentColor = Color.White
+                ),
+                modifier = Modifier.testTag("settings_menu_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.MoreVert,
+                    contentDescription = "Settings Menu"
+                )
+            }
+
+            DropdownMenu(
+                expanded = showSettingsMenu,
+                onDismissRequest = { showSettingsMenu = false },
+                modifier = Modifier
+                    .background(Color(0xFF1E1E1E))
+                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                    .testTag("settings_dropdown_menu")
+            ) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = if (showGridLines) "Hide Grid" else "Show Grid",
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp
+                        )
+                    },
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.toggleGridLines()
+                        showSettingsMenu = false
+                    },
+                    modifier = Modifier.testTag("menu_item_grid_lines")
+                )
+
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = "Aspect Ratio: ${if (aspectRatioSetting == "4:3") "1:1" else "4:3"}",
+                            color = Color.White,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 14.sp
+                        )
+                    },
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val nextRatio = if (aspectRatioSetting == "4:3") "1:1" else "4:3"
+                        viewModel.setAspectRatio(nextRatio)
+                        showSettingsMenu = false
+                    },
+                    modifier = Modifier.testTag("menu_item_aspect_ratio")
+                )
+            }
         }
 
         // 4. Compact Floating Capsule Controls below the Zoom Box
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = (((totalHeight.value - (totalWidth.value * 0.85f * 1.35f)) / 2.3f + 6) + (totalWidth.value * 0.85f * 1.35f) + 16).dp)
+                .offset(y = (((totalHeight.value - (totalWidth.value * 0.85f * aspectRatioMultiplier)) / 2.3f + 6) + (totalWidth.value * 0.85f * aspectRatioMultiplier) + 16).dp)
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
