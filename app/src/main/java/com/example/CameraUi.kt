@@ -3,6 +3,7 @@ package com.example
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.camera.core.ImageCapture
@@ -611,7 +612,8 @@ fun CameraActiveScreen(
                                             rawFile = rawFile,
                                             boxWidthFraction = animatedBoxWidthFraction,
                                             screenWidth = totalWidth.value,
-                                            screenHeight = totalHeight.value
+                                            screenHeight = totalHeight.value,
+                                            captureFocalLength = focalLength
                                         )
                                     },
                                     onCaptureError = { exc ->
@@ -702,6 +704,7 @@ fun CameraActiveScreen(
                 PhotoViewerOverlay(
                     photo = activePhoto,
                     allPhotos = capturedPhotos,
+                    viewModel = viewModel,
                     onClose = { viewModel.setSelectedPhoto(null) },
                     onDelete = { file ->
                         viewModel.deletePhoto(context, file)
@@ -717,12 +720,22 @@ fun CameraActiveScreen(
 fun PhotoViewerOverlay(
     photo: File,
     allPhotos: List<File>,
+    viewModel: CameraViewModel,
     onClose: () -> Unit,
     onDelete: (File) -> Unit,
     onSelectPhoto: (File) -> Unit
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+
+    // Read EXIF data on first composition and whenever photo changes
+    var exifData by remember(photo) { mutableStateOf(ExifData()) }
+    LaunchedEffect(photo) {
+        exifData = viewModel.readExifData(photo)
+    }
+
+    // Device model name (user-facing)
+    val phoneName = Build.MODEL
 
     BackHandler(onBack = onClose)
 
@@ -846,26 +859,28 @@ fun PhotoViewerOverlay(
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    // Retro caption
+                    // Retro info bar: phone name left, exif details right
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Phone / device model name
                         Text(
-                            text = "CPM 35 // AMBER CHROM",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.Black.copy(alpha = 0.5f),
-                            fontFamily = FontFamily.Monospace,
+                            text = phoneName,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = Color.Black.copy(alpha = 0.55f),
+                            fontFamily = FontFamily.Serif,
                             modifier = Modifier.padding(horizontal = 4.dp)
                         )
+                        // Focal length, shutter speed, ISO
                         Text(
-                            text = "JUL 16 '26",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF97316),
-                            fontFamily = FontFamily.Monospace,
+                            text = "${exifData.focalLength}  ${exifData.shutterSpeed}  ${exifData.iso}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Normal,
+                            color = Color.Black.copy(alpha = 0.55f),
+                            fontFamily = FontFamily.Serif,
                             modifier = Modifier.padding(horizontal = 4.dp)
                         )
                     }

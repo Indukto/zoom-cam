@@ -21,6 +21,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+data class ExifData(
+    val focalLength: String = "--",
+    val shutterSpeed: String = "--",
+    val iso: String = "--"
+)
+
 class CameraViewModel : ViewModel() {
 
     private val _zoomRatio = MutableStateFlow(1.0f)
@@ -146,7 +152,8 @@ class CameraViewModel : ViewModel() {
         rawFile: File,
         boxWidthFraction: Float,
         screenWidth: Float,
-        screenHeight: Float
+        screenHeight: Float,
+        captureFocalLength: Int
     ) {
         _isCapturing.value = true
         viewModelScope.launch(Dispatchers.IO) {
@@ -221,6 +228,14 @@ class CameraViewModel : ViewModel() {
                     if (croppedBitmap != processedBitmap) {
                         croppedBitmap.recycle()
                     }
+
+                    // 4. Rename file to embed focal length for later display
+                    val focalDir = rawFile.parentFile
+                    val focalName = rawFile.nameWithoutExtension
+                    val focalExt = rawFile.extension
+                    val newName = "${focalName}_${captureFocalLength}mm.$focalExt"
+                    val renamedFile = File(focalDir, newName)
+                    rawFile.renameTo(renamedFile)
                 }
 
                 // Reload photo gallery
@@ -230,6 +245,41 @@ class CameraViewModel : ViewModel() {
             } finally {
                 _isCapturing.value = false
             }
+        }
+    }
+    // Read EXIF display data from a saved photo file
+    fun readExifData(file: File): ExifData {
+        return try {
+            val exif = ExifInterface(file.absolutePath)
+            
+            // Shutter speed from exposure time
+            val exposureTime = exif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0)
+            val shutterSpeed = if (exposureTime > 0.0) {
+                if (exposureTime < 1.0) {
+                    val denom = kotlin.math.round(1.0 / exposureTime).toInt()
+                    "1/${denom}s"
+                } else {
+                    "${kotlin.math.round(exposureTime).toInt()}s"
+                }
+            } else "--"
+            
+            // ISO
+            val isoRaw = exif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
+            val iso = if (isoRaw > 0) "ISO $isoRaw" else "--"
+            
+            // Focal length from filename (the zoom box simulated focal length)
+            val name = file.nameWithoutExtension
+            val focalMatch = Regex("""_(\d+)mm$""").find(name)
+            val focalLength = focalMatch?.groupValues?.get(1)?.let { "${it}mm" } ?: "--"
+            
+            ExifData(
+                focalLength = focalLength,
+                shutterSpeed = shutterSpeed,
+                iso = iso
+            )
+        } catch (e: Exception) {
+            Log.e("CameraViewModel", "Error reading EXIF data", e)
+            ExifData()
         }
     }
 
