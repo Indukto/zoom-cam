@@ -9,10 +9,6 @@ import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.delay
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -114,8 +110,6 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 
 // How long the white shutter flash stays fully opaque before it begins fading out.
 // Kept short (independent of capture latency) so a lens-swap capture doesn't leave a
@@ -252,15 +246,9 @@ fun CameraActiveScreen(
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
 
-    val lifecycleOwner = LocalLifecycleOwner.current
-
     // Create executors for CameraX operations
     val mainExecutor = ContextCompat.getMainExecutor(context)
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
-
-    // Refs for captureWithBestLens (camera provider + surface provider)
-    // These are provided by CameraPreviewView via the onLensCaptureReady callback
-    var lensCaptureHandle by remember { mutableStateOf<LensCaptureHandle?>(null) }
 
     // Floating UI flash visual effect. This is a fixed-duration shutter burst — it
     // intentionally does NOT wait for capture completion, which previously made the
@@ -299,7 +287,6 @@ fun CameraActiveScreen(
             },
             onAvailableFocalLengths = { viewModel.setAvailableFocalLengths(it) },
             imageCaptureProvider = { activeImageCapture = it },
-            onLensCaptureReady = { handle -> lensCaptureHandle = handle },
             onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
 
@@ -640,33 +627,33 @@ fun CameraActiveScreen(
                                 // Trigger brief flash screen feedback
                                 flashFlashActive = true
 
-                                // Check if a lens swap is actually needed.
-                                // Preview is always bound to Primary, so if capture lens is also
-                                // Primary (or front camera), use the fast path (no unbind/rebind).
+                                // Two capture paths:
+                                // 1) Same lens (Primary or front camera) →
+                                //    triggerImageCapture via CameraX (fast path).
+                                // 2) Different lens (Tele/UW) →
+                                //    captureWithCamera2 via Camera2 API directly,
+                                //    keeping CameraX preview streaming on Primary.
                                 val needsLensSwap = !isFrontCamera && captureLensRole != LensRole.PRIMARY
 
                                 if (needsLensSwap) {
-                                    val handle = lensCaptureHandle
-                                    if (handle != null) {
-                                        captureWithBestLens(
+                                    // Find the target lens profile for Camera2 capture
+                                    val catalog = LensCatalog(context)
+                                    val result = catalog.enumerate()
+                                    val targetProfile = when (captureLensRole) {
+                                        LensRole.ULTRA_WIDE -> result.ultraWide
+                                        LensRole.TELE -> result.tele
+                                        else -> null
+                                    }
+
+                                    if (targetProfile != null &&
+                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                                    ) {
+                                        captureWithCamera2(
                                             context = context,
-                                            cameraProvider = handle.cameraProvider,
-                                            lifecycleOwner = lifecycleOwner,
-                                            baseFocalLength = baseFocalLength,
+                                            targetLogicalId = targetProfile.logicalCameraId,
+                                            targetPhysicalId = targetProfile.physicalCameraId,
                                             targetFocalLength = focalLength,
                                             flashMode = flashMode,
-                                            surfaceProvider = handle.surfaceProvider,
-                                            isFrontCamera = isFrontCamera,
-                                            executor = mainExecutor,
-                                            rebindPreview = {
-                                                rebindDefaultCamera(
-                                                    cameraProvider = handle.cameraProvider,
-                                                    lifecycleOwner = lifecycleOwner,
-                                                    surfaceProvider = handle.surfaceProvider,
-                                                    isFrontCamera = isFrontCamera,
-                                                    imageCapture = captureDevice
-                                                )
-                                            },
                                             onCaptured = { rawFile ->
                                                 viewModel.processAndSavePhoto(
                                                     context = context,
@@ -677,11 +664,34 @@ fun CameraActiveScreen(
                                                     captureFocalLength = focalLength
                                                 )
                                             },
-                                            onCaptureError = { exc ->
-                                                Log.e("CameraActiveScreen", "Capture failed", exc)
+                                            onError = { exc ->
+                                                Log.e("CameraActiveScreen",
+                                                    "Camera2 capture failed, falling back", exc)
+                                                // Fallback: capture from Primary
+                                                triggerImageCapture(
+                                                    context = context,
+                                                    imageCapture = captureDevice,
+                                                    executor = mainExecutor,
+                                                    onCaptured = { rawFile ->
+                                                        viewModel.processAndSavePhoto(
+                                                            context = context,
+                                                            rawFile = rawFile,
+                                                            boxWidthFraction = animatedBoxWidthFraction,
+                                                            screenWidth = totalWidth.value,
+                                                            screenHeight = totalHeight.value,
+                                                            captureFocalLength = focalLength
+                                                        )
+                                                    },
+                                                    onCaptureError = { fallbackExc ->
+                                                        Log.e("CameraActiveScreen",
+                                                            "Fallback capture also failed",
+                                                            fallbackExc)
+                                                    }
+                                                )
                                             }
                                         )
                                     } else {
+                                        // Fallback: no target profile or API < 28
                                         triggerImageCapture(
                                             context = context,
                                             imageCapture = captureDevice,
@@ -697,12 +707,13 @@ fun CameraActiveScreen(
                                                 )
                                             },
                                             onCaptureError = { exc ->
-                                                Log.e("CameraActiveScreen", "Capture failed", exc)
+                                                Log.e("CameraActiveScreen",
+                                                    "Capture failed", exc)
                                             }
                                         )
                                     }
                                 } else {
-                                    // Fast path: same lens, skip unbind/rebind
+                                    // Same lens: CameraX fast path
                                     triggerImageCapture(
                                         context = context,
                                         imageCapture = captureDevice,
@@ -718,7 +729,8 @@ fun CameraActiveScreen(
                                             )
                                         },
                                         onCaptureError = { exc ->
-                                            Log.e("CameraActiveScreen", "Capture failed", exc)
+                                            Log.e("CameraActiveScreen",
+                                                "Capture failed", exc)
                                         }
                                     )
                                 }

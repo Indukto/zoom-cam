@@ -1,15 +1,23 @@
-@file:OptIn(ExperimentalCamera2Interop::class)
 package com.example
 
 import android.content.Context
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureFailure
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
+import android.media.ImageReader
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
+import android.view.Surface
 import android.view.ViewGroup
 import android.view.WindowManager
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.Camera2Interop
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -30,181 +38,196 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.zoom.LensCatalog
-import com.example.zoom.LensRole
 import com.example.zoom.PreviewSessionManager
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
 
 /**
- * A handle containing the ProcessCameraProvider and Preview.SurfaceProvider
- * needed by captureWithBestLens to temporarily switch lenses for capture.
- */
-data class LensCaptureHandle(
-    val cameraProvider: ProcessCameraProvider,
-    val surfaceProvider: Preview.SurfaceProvider
-)
-
-/**
- * Uses LensCatalog to enumerate cameras with proper crop-factor computation,
- * matching the architecture spec §5.1 (LensCatalog) and §9 (physical camera targeting).
- */
-private fun getBackCameraFocalLengths(context: Context): List<Float> {
-    return try {
-        val catalog = LensCatalog(context)
-        val result = catalog.enumerate()
-        result.allLenses.map { it.equivFocalMm }.sorted()
-    } catch (e: Exception) {
-        Log.e("CameraPreviewView", "Error reading camera focal lengths via LensCatalog", e)
-        listOf(24f, 77f)
-    }
-}
-
-/**
- * Builds a CameraSelector for a specific physical camera, matching the
- * architecture spec §9: uses Camera2Interop.Extender.setPhysicalCameraId().
- */
-fun buildCameraSelectorForLens(context: Context, baseFocalLength: Int): CameraSelector {
-    return try {
-        val catalog = LensCatalog(context)
-        val result = catalog.enumerate()
-
-        // Find the lens whose equivFocalMm is closest to baseFocalLength
-        val targetLens = result.allLenses.minByOrNull {
-            kotlin.math.abs(it.equivFocalMm - baseFocalLength)
-        }
-
-        if (targetLens != null) {
-            CameraSelector.Builder()
-                .addCameraFilter { cameras ->
-                    cameras.filter { Camera2CameraInfo.from(it).cameraId == targetLens.logicalCameraId }
-                }
-                .build()
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
-    } catch (e: Exception) {
-        Log.e("CameraPreviewView", "Error building lens selector", e)
-        CameraSelector.DEFAULT_BACK_CAMERA
-    }
-}
-
-/**
- * Temporarily switches to the target lens, captures one photo at full quality,
- * then rebinds the original wide-angle camera so the preview resumes.
+ * Captures a photo from a specific physical sub-camera using Camera2 API directly.
+ * The CameraX preview (bound to Primary) keeps streaming uninterrupted because
+ * Camera2 opens a SEPARATE camera device — the HAL manages both independently.
  *
- * Updated to use LensCatalog for proper physical camera targeting.
+ * Falls back gracefully on API < 28 (setPhysicalCameraId unavailable) or if the
+ * target logical camera can't be opened.
  */
-fun captureWithBestLens(
+fun captureWithCamera2(
     context: Context,
-    cameraProvider: ProcessCameraProvider,
-    lifecycleOwner: LifecycleOwner,
-    baseFocalLength: Int,
+    targetLogicalId: String,
+    targetPhysicalId: String,
     targetFocalLength: Int,
     flashMode: Int,
-    surfaceProvider: Preview.SurfaceProvider,
-    isFrontCamera: Boolean,
-    executor: Executor,
-    rebindPreview: () -> Unit,
     onCaptured: (File) -> Unit,
-    onCaptureError: (ImageCaptureException) -> Unit
+    onError: (Exception) -> Unit
 ) {
-    val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    val rotation = windowManager.defaultDisplay.rotation
-
-    val cameraSelector = if (!isFrontCamera && baseFocalLength > 0) {
-        buildCameraSelectorForLens(context, baseFocalLength)
-    } else {
-        if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-    }
-
-    // Find the target physical lens ID if we're doing a lens-switched capture
-    var targetPhysicalId: String? = null
-    if (!isFrontCamera && baseFocalLength > 0) {
-        val catalog = LensCatalog(context)
-        val result = catalog.enumerate()
-        val targetLens = result.allLenses.minByOrNull {
-            kotlin.math.abs(it.equivFocalMm - baseFocalLength)
-        }
-        targetPhysicalId = targetLens?.physicalCameraId
-    }
-
-    val tempImageCapture = ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-        .setTargetRotation(rotation)
-        .apply {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                targetPhysicalId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) }
-            }
-            when (flashMode) {
-                0 -> setFlashMode(ImageCapture.FLASH_MODE_AUTO)
-                1 -> setFlashMode(ImageCapture.FLASH_MODE_ON)
-                else -> setFlashMode(ImageCapture.FLASH_MODE_OFF)
-            }
-        }
-        .build()
-
     val directory = context.getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES) ?: context.cacheDir
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
     val photoFile = File(directory, "RETRO_IMG_${timeStamp}_${targetFocalLength}mm.jpg")
-    val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
-    try {
-        cameraProvider.unbindAll()
-        val previewBuilder = Preview.Builder()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-            targetPhysicalId?.let { Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(it) }
-        }
-        val capturePreview = previewBuilder.build().apply { setSurfaceProvider(surfaceProvider) }
-        cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, capturePreview, tempImageCapture)
+    val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    val cameraThread = HandlerThread("Camera2Capture").apply { start() }
+    val cameraHandler = Handler(cameraThread.looper)
 
-        tempImageCapture.takePicture(outputOptions, executor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    rebindPreview()
-                    onCaptured(photoFile)
-                }
-                override fun onError(exception: ImageCaptureException) {
-                    rebindPreview()
-                    onCaptureError(exception)
-                }
-            })
-    } catch (e: Exception) {
-        Log.e("CameraPreviewView", "Error capturing with best lens", e)
-        rebindPreview()
+    fun cleanup(
+        reader: ImageReader? = null,
+        device: CameraDevice? = null
+    ) {
+        try { reader?.close() } catch (_: Exception) {}
+        try { device?.close() } catch (_: Exception) {}
+        cameraThread.quitSafely()
     }
-}
 
-/**
- * Rebinds the camera with the existing ImageCapture and Preview.
- * This is used to resume the wide-angle preview after a lens-switched capture.
- */
-fun rebindDefaultCamera(
-    cameraProvider: ProcessCameraProvider,
-    lifecycleOwner: LifecycleOwner,
-    surfaceProvider: Preview.SurfaceProvider,
-    isFrontCamera: Boolean,
-    imageCapture: ImageCapture
-) {
-    val preview = Preview.Builder().build().apply { setSurfaceProvider(surfaceProvider) }
-    val cameraSelector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
     try {
-        cameraProvider.unbindAll()
-        cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture)
+        val characteristics = cameraManager.getCameraCharacteristics(targetLogicalId)
+        val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val outputSizes = configMap?.getOutputSizes(ImageFormat.JPEG)
+        val size = outputSizes?.maxByOrNull { it.width * it.height }
+        if (size == null) { cleanup(); onError(RuntimeException("No JPEG output size")); return }
+
+        val imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
+
+        // Read sensor orientation from the **physical** sub-camera (not the logical camera),
+        // because UW / Tele sensors often have a different physical mounting rotation
+        // than the Primary. Ignoring this causes a 90° (or similar) rotation error.
+        val physicalChars = try {
+            cameraManager.getCameraCharacteristics(targetPhysicalId)
+        } catch (_: Exception) {
+            characteristics
+        }
+        val sensorOrientation = physicalChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val deviceRotation = when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        // Standard Camera2 JPEG orientation formula:
+        //   jpegOrientation = (sensorOrientation + deviceRotation) % 360
+        // For back-facing cameras (which is always the case here — captureWithCamera2
+        // is only called for back physical lenses), no mirror compensation is needed.
+        val jpegOrientation = (sensorOrientation + deviceRotation) % 360
+
+        cameraManager.openCamera(targetLogicalId, object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) {
+                try {
+                    val sessionCallback = object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            val requestBuilder = camera.createCaptureRequest(
+                                CameraDevice.TEMPLATE_STILL_CAPTURE
+                            )
+                            requestBuilder.addTarget(imageReader.surface)
+
+                            requestBuilder.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
+                            requestBuilder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+
+                            when (flashMode) {
+                                0 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
+                                    CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+                                1 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
+                                    CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
+                                else -> {
+                                    requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
+                                        CaptureRequest.CONTROL_AE_MODE_ON)
+                                }
+                            }
+                            val request = requestBuilder.build()
+
+                            imageReader.setOnImageAvailableListener({ reader ->
+                                try {
+                                    val image = reader.acquireLatestImage()
+                                    if (image != null) {
+                                        val buffer = image.planes[0].buffer
+                                        val bytes = ByteArray(buffer.remaining())
+                                        buffer.get(bytes)
+                                        FileOutputStream(photoFile).use { it.write(bytes) }
+                                        image.close()
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("CameraPreviewView",
+                                        "Error reading Camera2 image", e)
+                                } finally {
+                                    cleanup(imageReader, camera)
+                                    onCaptured(photoFile)
+                                }
+                            }, cameraHandler)
+
+                            session.capture(request,
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureFailed(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        failure: CaptureFailure
+                                    ) {
+                                        Log.e("CameraPreviewView",
+                                            "Camera2 capture failed: ${failure.reason}")
+                                        cleanup(imageReader, camera)
+                                        onError(RuntimeException("Capture failed"))
+                                    }
+                                }, cameraHandler)
+                        }
+
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            Log.e("CameraPreviewView", "Camera2 session configure failed")
+                            cleanup(imageReader, camera)
+                            onError(RuntimeException("Session configure failed"))
+                        }
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        val outputConfig = OutputConfiguration(imageReader.surface)
+                        outputConfig.setPhysicalCameraId(targetPhysicalId)
+                        val executor = java.util.concurrent.Executor { command -> cameraHandler.post(command) }
+                        val sessionConfig = SessionConfiguration(
+                            SessionConfiguration.SESSION_REGULAR,
+                            listOf(outputConfig),
+                            executor,
+                            sessionCallback
+                        )
+                        camera.createCaptureSession(sessionConfig)
+                    } else {
+                        camera.createCaptureSession(
+                            listOf(imageReader.surface),
+                            sessionCallback,
+                            cameraHandler
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.e("CameraPreviewView", "Error creating Camera2 session", e)
+                    cleanup(imageReader, camera)
+                    onError(e)
+                }
+            }
+
+            override fun onDisconnected(camera: CameraDevice) {
+                Log.e("CameraPreviewView", "Camera2 disconnected")
+                cleanup(imageReader, camera)
+                onError(RuntimeException("Camera disconnected"))
+            }
+
+            override fun onError(camera: CameraDevice, error: Int) {
+                Log.e("CameraPreviewView", "Camera2 error: $error")
+                cleanup(imageReader, camera)
+                onError(RuntimeException("Camera error: $error"))
+            }
+        }, cameraHandler)
     } catch (e: Exception) {
-        Log.e("CameraPreviewView", "Error rebinding default camera", e)
+        Log.e("CameraPreviewView", "Error opening Camera2 device", e)
+        cleanup()
+        onError(e)
     }
 }
 
@@ -219,14 +242,12 @@ fun CameraPreviewView(
     onZoomTick: () -> Unit = {},
     onAvailableFocalLengths: (List<Float>) -> Unit,
     imageCaptureProvider: (ImageCapture) -> Unit,
-    onLensCaptureReady: ((LensCaptureHandle) -> Unit)? = null,
     onLensCatalogReady: ((LensCatalog.CatalogResult) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
     val previewView = remember {
         PreviewView(context).apply {
@@ -251,14 +272,6 @@ fun CameraPreviewView(
 
     LaunchedEffect(activeImageCapture) { imageCaptureProvider(activeImageCapture) }
 
-    // Expose the camera provider + surface provider as a LensCaptureHandle
-    LaunchedEffect(cameraProviderRef) {
-        val cp = cameraProviderRef
-        if (cp != null) {
-            onLensCaptureReady?.invoke(LensCaptureHandle(cp, previewView.surfaceProvider))
-        }
-    }
-
     // Enumerate cameras using LensCatalog for proper physical camera IDs
     LaunchedEffect(Unit) {
         val catalog = LensCatalog(context)
@@ -273,7 +286,6 @@ fun CameraPreviewView(
         cameraProviderFuture.addListener({
             try {
                 val cp = cameraProviderFuture.get()
-                cameraProviderRef = cp
 
                 val previewManager = PreviewSessionManager(context, lifecycleOwner)
                 val preview = Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) }
