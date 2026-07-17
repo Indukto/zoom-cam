@@ -1,27 +1,23 @@
 package com.example.zoom
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Unit tests for FovMapper — the pure math module.
  * No Android dependencies needed, runs on JVM.
  *
- * Tests the acceptance criteria from the architecture spec §10:
- * 1. At 24mm, box scale = 1.0 (full-frame).
- * 2. At 85mm, box scale ≈ 0.282, preview lens still Primary.
- * 3. At exactly 116.2mm, capture silently switches to Tele; no visible preview lens change.
- * 4. Zooming past 116.2mm and back below ~108mm (hysteresis band) does not flicker the capture lens.
- * 5. Box aspect ratio matches sensor crop AR regardless of device orientation or display AR.
+ * Tests the remaining functions after the manual lens selection refactor:
+ * - boxScale: zoom box overlay size (only meaningful on Primary lens)
+ * - captureCropFactor: digital crop factor for post-capture
+ * - outputMegapixels: estimated output resolution after crop
  */
 class FovMapperTest {
 
-    // Pixel 7 Pro reference focal lengths from the spec
+    // Pixel 7 Pro reference focal lengths
     private val UW_FOCAL_MM = 13.4f
     private val PRIMARY_FOCAL_MM = 24f
     private val TELE_FOCAL_MM = 116.2f
-    private val HYSTERESIS_MM = 8f
 
     // --- boxScale tests ---
 
@@ -84,232 +80,6 @@ class FovMapperTest {
         assertEquals("Negative preview focal should return 1.0", 1.0f, scale, 0.001f)
     }
 
-    // --- previewLens tests ---
-
-    @Test
-    fun `previewLens always returns ultraWide regardless of target`() {
-        val lens = FovMapper.previewLens(
-            targetFocalMm = 15f,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("Preview should always be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    @Test
-    fun `previewLens at primary focal still returns ultraWide`() {
-        val lens = FovMapper.previewLens(
-            targetFocalMm = PRIMARY_FOCAL_MM,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 24mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    @Test
-    fun `previewLens at 50mm still returns ultraWide`() {
-        val lens = FovMapper.previewLens(
-            targetFocalMm = 50f,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 50mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    @Test
-    fun `previewLens at 85mm still returns ultraWide`() {
-        val lens = FovMapper.previewLens(
-            targetFocalMm = 85f,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 85mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    @Test
-    fun `previewLens at 116dot2mm returns ultraWide (Tele never used for preview)`() {
-        val lens = FovMapper.previewLens(
-            targetFocalMm = TELE_FOCAL_MM,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 116.2mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    @Test
-    fun `previewLens at 200mm returns ultraWide`() {
-        val lens = FovMapper.previewLens(
-            targetFocalMm = 200f,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 200mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    // --- captureLens tests ---
-
-    @Test
-    fun `captureLens at 24mm uses Primary`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = PRIMARY_FOCAL_MM,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 24mm, capture should use PRIMARY", LensRole.PRIMARY, lens)
-    }
-
-    @Test
-    fun `captureLens at 50mm uses Primary`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 50f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 50mm, capture should use PRIMARY", LensRole.PRIMARY, lens)
-    }
-
-    @Test
-    fun `captureLens at 85mm uses Primary`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 85f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 85mm, capture should use PRIMARY", LensRole.PRIMARY, lens)
-    }
-
-    @Test
-    fun `captureLens at exactly 116dot2mm switches to Tele`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = TELE_FOCAL_MM,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At exactly 116.2mm, capture should switch to TELE", LensRole.TELE, lens)
-    }
-
-    @Test
-    fun `captureLens at 120mm uses Tele`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 120f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 120mm, capture should use TELE", LensRole.TELE, lens)
-    }
-
-    @Test
-    fun `captureLens at 200mm uses Tele`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 200f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 200mm, capture should use TELE", LensRole.TELE, lens)
-    }
-
-    // --- Hysteresis tests ---
-
-    @Test
-    fun `captureLens inside hysteresis band below tele holds steady on Primary`() {
-        // Start at 100mm (below tele threshold of 116.2), current capture is Primary
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 112f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM,
-            hysteresisMm = HYSTERESIS_MM
-        )
-        // 112mm is inside hysteresis: 116.2 - 8 = 108.2 < 112 < 116.2
-        assertEquals("Inside hysteresis band, should hold PRIMARY", LensRole.PRIMARY, lens)
-    }
-
-    @Test
-    fun `captureLens inside hysteresis band after tele holds steady on Tele`() {
-        // Start at 120mm (above tele), current capture is Tele, then zoom back to 112mm
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 112f,
-            currentCaptureLens = LensRole.TELE,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM,
-            hysteresisMm = HYSTERESIS_MM
-        )
-        // 112mm is inside hysteresis band, and current is Tele → hold Tele
-        assertEquals("Inside hysteresis band returning from Tele, should hold TELE", LensRole.TELE, lens)
-    }
-
-    @Test
-    fun `captureLens below hysteresis band after tele switches back to Primary`() {
-        // After zooming far back below the hysteresis band (e.g., 100mm, below 108.2)
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 100f,
-            currentCaptureLens = LensRole.TELE,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM,
-            hysteresisMm = HYSTERESIS_MM
-        )
-        // 100mm is below hysteresis band (108.2) → switch to Primary
-        assertEquals("Below hysteresis band, should switch to PRIMARY", LensRole.PRIMARY, lens)
-    }
-
-    @Test
-    fun `captureLens below ultraWide threshold uses UltraWide`() {
-        val lens = FovMapper.captureLens(
-            targetFocalMm = 18f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("At 18mm, capture should use ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
-    }
-
-    // --- shouldPreWarmTele tests ---
-
-    @Test
-    fun `shouldPreWarmTele at 100mm is false`() {
-        val should = FovMapper.shouldPreWarmTele(
-            targetFocalMm = 100f,
-            teleFocalMm = TELE_FOCAL_MM
-        )
-        assertTrue("At 100mm, should not pre-warm Tele (far from 116.2)", !should)
-    }
-
-    @Test
-    fun `shouldPreWarmTele at 105mm is true within 15mm threshold`() {
-        val should = FovMapper.shouldPreWarmTele(
-            targetFocalMm = 105f,
-            teleFocalMm = TELE_FOCAL_MM,
-            triggerDistanceMm = 15f
-        )
-        // 105 >= 116.2 - 15 = 101.2
-        assertTrue("At 105mm, should pre-warm Tele", should)
-    }
-
-    @Test
-    fun `shouldPreWarmTele at 116dot2mm is true`() {
-        val should = FovMapper.shouldPreWarmTele(
-            targetFocalMm = TELE_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM
-        )
-        assertTrue("At 116.2mm, should pre-warm Tele", should)
-    }
-
     // --- captureCropFactor tests ---
 
     @Test
@@ -365,7 +135,7 @@ class FovMapperTest {
         assertEquals("Tele native 48MP at 1x", 48.0f, mp, 0.5f)
     }
 
-    // --- Integration: Acceptance Criteria from Spec §10 ---
+    // --- Integration: Acceptance Criteria ---
 
     @Test
     fun `acceptance criteria 1 - at 24mm box scale is 1`() {
@@ -374,70 +144,9 @@ class FovMapperTest {
     }
 
     @Test
-    fun `acceptance criteria 2 - at 85mm box scale is approx 0dot282, preview is UltraWide`() {
+    fun `acceptance criteria 2 - at 85mm box scale is approx 0dot282`() {
         val scale = FovMapper.boxScale(PRIMARY_FOCAL_MM, 85f)
         val expected = PRIMARY_FOCAL_MM / 85f
         assertEquals("AC2: At 85mm, box scale ≈ 0.282", expected, scale, 0.001f)
-
-        val previewLens = FovMapper.previewLens(
-            targetFocalMm = 85f,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("AC2: Preview lens should be UltraWide", LensRole.ULTRA_WIDE, previewLens)
-    }
-
-    @Test
-    fun `acceptance criteria 3 - at exactly 116dot2mm capture switches to Tele, preview stays UW`() {
-        val captureLens = FovMapper.captureLens(
-            targetFocalMm = TELE_FOCAL_MM,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("AC3: At 116.2mm, capture switches to TELE", LensRole.TELE, captureLens)
-
-        val previewLens = FovMapper.previewLens(
-            targetFocalMm = TELE_FOCAL_MM,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("AC3: Preview lens stays UltraWide", LensRole.ULTRA_WIDE, previewLens)
-    }
-
-    @Test
-    fun `acceptance criteria 4 - hysteresis band prevents flicker`() {
-        // Start above tele (120mm) → Tele
-        val enteringTele = FovMapper.captureLens(
-            targetFocalMm = 120f,
-            currentCaptureLens = LensRole.PRIMARY,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM
-        )
-        assertEquals("Entering 120mm should use TELE", LensRole.TELE, enteringTele)
-
-        // Zoom back to 112mm (inside hysteresis band) → should hold Tele
-        val holdingTele = FovMapper.captureLens(
-            targetFocalMm = 112f,
-            currentCaptureLens = LensRole.TELE,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM,
-            hysteresisMm = HYSTERESIS_MM
-        )
-        assertEquals("Inside hysteresis band, should hold TELE", LensRole.TELE, holdingTele)
-
-        // Zoom further back to 100mm (below hysteresis band) → should switch to Primary
-        val switchingBack = FovMapper.captureLens(
-            targetFocalMm = 100f,
-            currentCaptureLens = LensRole.TELE,
-            primaryFocalMm = PRIMARY_FOCAL_MM,
-            teleFocalMm = TELE_FOCAL_MM,
-            ultraWideFocalMm = UW_FOCAL_MM,
-            hysteresisMm = HYSTERESIS_MM
-        )
-        assertEquals("Below hysteresis band, should switch to PRIMARY", LensRole.PRIMARY, switchingBack)
     }
 }

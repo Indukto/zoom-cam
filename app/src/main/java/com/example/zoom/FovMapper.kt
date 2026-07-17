@@ -16,11 +16,16 @@ package com.example.zoom
  *   boxScale = tan(HFOV(target)/2) / tan(HFOV(preview)/2) = preview/target
  *
  * The atan/tan cancel exactly, so boxScale is purely the focal length ratio.
+ *
+ * Lens selection is now manual — the user picks which physical lens to use
+ * (Ultra-wide, Primary, or Tele). The zoom box overlay only appears when
+ * the Primary lens is selected, showing the digital crop area.
  */
 object FovMapper {
 
     /**
      * Computes the box scale factor for the zoom-box overlay.
+     * Only meaningful when the Primary lens is active.
      *
      * @param previewFocalMm The equivalent focal length of the current preview lens
      * @param targetFocalMm The target equivalent focal length the user has selected
@@ -30,72 +35,6 @@ object FovMapper {
     fun boxScale(previewFocalMm: Float, targetFocalMm: Float): Float {
         if (targetFocalMm <= 0f || previewFocalMm <= 0f) return 1f
         return (previewFocalMm / targetFocalMm).coerceIn(0f, 1f)
-    }
-
-    /**
-     * Determines which lens should be used for the live preview.
-     *
-     * The Ultra-wide lens is always used as the viewfinder so the user sees
-     * maximum context at every zoom level. The zoom-box overlay then indicates
-     * which portion of the scene will be captured.
-     *
-     * The Tele lens is never used for preview — it's only switched in at capture time.
-     */
-    fun previewLens(
-        targetFocalMm: Float,
-        primaryFocalMm: Float,
-        ultraWideFocalMm: Float
-    ): LensRole {
-        return LensRole.ULTRA_WIDE
-    }
-
-    /**
-     * Determines which lens should be used for image capture.
-     *
-     * Uses hysteresis around the telephoto threshold to prevent flickering
-     * when the user's finger sits right on the boundary.
-     *
-     * @param targetFocalMm The target equivalent focal length
-     * @param currentCaptureLens The lens currently selected for capture (to hold steady in hysteresis band)
-     * @param primaryFocalMm The Primary lens's equivalent focal length
-     * @param teleFocalMm The Telephoto lens's equivalent focal length
-     * @param hysteresisMm The hysteresis margin in mm (default 8f as per spec)
-     * @return The LensRole to use for capture
-     */
-    fun captureLens(
-        targetFocalMm: Float,
-        currentCaptureLens: LensRole,
-        primaryFocalMm: Float,
-        teleFocalMm: Float,
-        ultraWideFocalMm: Float,
-        hysteresisMm: Float = 8f
-    ): LensRole {
-        return when {
-            // Above tele threshold → use Tele
-            targetFocalMm >= teleFocalMm -> LensRole.TELE
-
-            // Below tele threshold minus hysteresis → use Primary or Ultra-wide
-            targetFocalMm < teleFocalMm - hysteresisMm -> {
-                if (targetFocalMm < primaryFocalMm) LensRole.ULTRA_WIDE
-                else LensRole.PRIMARY
-            }
-
-            // Inside hysteresis band → hold steady on current capture lens
-            else -> currentCaptureLens
-        }
-    }
-
-    /**
-     * Determines if the Tele lens should be pre-warmed.
-     * Pre-warming is triggered speculatively when the target focal length
-     * gets within `triggerDistanceMm` of the telephoto threshold.
-     */
-    fun shouldPreWarmTele(
-        targetFocalMm: Float,
-        teleFocalMm: Float,
-        triggerDistanceMm: Float = 15f
-    ): Boolean {
-        return targetFocalMm >= teleFocalMm - triggerDistanceMm
     }
 
     /**

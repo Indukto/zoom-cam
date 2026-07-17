@@ -46,6 +46,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.zoom.LensCatalog
+import com.example.zoom.LensRole
 import com.example.zoom.PreviewSessionManager
 import java.io.File
 import java.io.FileOutputStream
@@ -54,14 +55,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
 
-/**
- * Captures a photo from a specific physical sub-camera using Camera2 API directly.
- * The CameraX preview (bound to Primary) keeps streaming uninterrupted because
- * Camera2 opens a SEPARATE camera device — the HAL manages both independently.
- *
- * Falls back gracefully on API < 28 (setPhysicalCameraId unavailable) or if the
- * target logical camera can't be opened.
- */
 fun captureWithCamera2(
     context: Context,
     targetLogicalId: String,
@@ -79,10 +72,7 @@ fun captureWithCamera2(
     val cameraThread = HandlerThread("Camera2Capture").apply { start() }
     val cameraHandler = Handler(cameraThread.looper)
 
-    fun cleanup(
-        reader: ImageReader? = null,
-        device: CameraDevice? = null
-    ) {
+    fun cleanup(reader: ImageReader? = null, device: CameraDevice? = null) {
         try { reader?.close() } catch (_: Exception) {}
         try { device?.close() } catch (_: Exception) {}
         cameraThread.quitSafely()
@@ -91,16 +81,9 @@ fun captureWithCamera2(
     try {
         val characteristics = cameraManager.getCameraCharacteristics(targetLogicalId)
 
-        // Read physical sub-camera characteristics first so we use the correct
-        // sensor orientation AND the correct (native) output resolution. The
-        // logical camera's SCALER_STREAM_CONFIGURATION_MAP may only include
-        // Primary-lens resolutions; using them for UW/Tele forces upscaling
-        // and causes visible pixelation / noise.
         val physicalChars = try {
             cameraManager.getCameraCharacteristics(targetPhysicalId)
-        } catch (_: Exception) {
-            characteristics
-        }
+        } catch (_: Exception) { characteristics }
         val sensorOrientation = physicalChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
 
         val configMap = physicalChars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -118,10 +101,6 @@ fun captureWithCamera2(
             Surface.ROTATION_270 -> 270
             else -> 0
         }
-        // Standard Camera2 JPEG orientation formula:
-        //   jpegOrientation = (sensorOrientation + deviceRotation) % 360
-        // For back-facing cameras (which is always the case here — captureWithCamera2
-        // is only called for back physical lenses), no mirror compensation is needed.
         val jpegOrientation = (sensorOrientation + deviceRotation) % 360
 
         cameraManager.openCamera(targetLogicalId, object : CameraDevice.StateCallback() {
@@ -129,23 +108,16 @@ fun captureWithCamera2(
                 try {
                     val sessionCallback = object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
-                            val requestBuilder = camera.createCaptureRequest(
-                                CameraDevice.TEMPLATE_STILL_CAPTURE
-                            )
+                            val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
                             requestBuilder.addTarget(imageReader.surface)
-
                             requestBuilder.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
                             requestBuilder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
-
                             when (flashMode) {
-                                0 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
-                                    CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
-                                1 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
-                                    CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
+                                0 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+                                1 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
                                 else -> {
                                     requestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
-                                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE,
-                                        CaptureRequest.CONTROL_AE_MODE_ON)
+                                    requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                                 }
                             }
                             val request = requestBuilder.build()
@@ -161,27 +133,20 @@ fun captureWithCamera2(
                                         image.close()
                                     }
                                 } catch (e: Exception) {
-                                    Log.e("CameraPreviewView",
-                                        "Error reading Camera2 image", e)
+                                    Log.e("CameraPreviewView", "Error reading Camera2 image", e)
                                 } finally {
                                     cleanup(imageReader, camera)
                                     onCaptured(photoFile)
                                 }
                             }, cameraHandler)
 
-                            session.capture(request,
-                                object : CameraCaptureSession.CaptureCallback() {
-                                    override fun onCaptureFailed(
-                                        session: CameraCaptureSession,
-                                        request: CaptureRequest,
-                                        failure: CaptureFailure
-                                    ) {
-                                        Log.e("CameraPreviewView",
-                                            "Camera2 capture failed: ${failure.reason}")
-                                        cleanup(imageReader, camera)
-                                        onError(RuntimeException("Capture failed"))
-                                    }
-                                }, cameraHandler)
+                            session.capture(request, object : CameraCaptureSession.CaptureCallback() {
+                                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                                    Log.e("CameraPreviewView", "Camera2 capture failed: ${failure.reason}")
+                                    cleanup(imageReader, camera)
+                                    onError(RuntimeException("Capture failed"))
+                                }
+                            }, cameraHandler)
                         }
 
                         override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -195,19 +160,10 @@ fun captureWithCamera2(
                         val outputConfig = OutputConfiguration(imageReader.surface)
                         outputConfig.setPhysicalCameraId(targetPhysicalId)
                         val executor = java.util.concurrent.Executor { command -> cameraHandler.post(command) }
-                        val sessionConfig = SessionConfiguration(
-                            SessionConfiguration.SESSION_REGULAR,
-                            listOf(outputConfig),
-                            executor,
-                            sessionCallback
-                        )
+                        val sessionConfig = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, listOf(outputConfig), executor, sessionCallback)
                         camera.createCaptureSession(sessionConfig)
                     } else {
-                        camera.createCaptureSession(
-                            listOf(imageReader.surface),
-                            sessionCallback,
-                            cameraHandler
-                        )
+                        camera.createCaptureSession(listOf(imageReader.surface), sessionCallback, cameraHandler)
                     }
                 } catch (e: Exception) {
                     Log.e("CameraPreviewView", "Error creating Camera2 session", e)
@@ -238,7 +194,8 @@ fun captureWithCamera2(
 @Composable
 fun CameraPreviewView(
     modifier: Modifier = Modifier,
-    zoomRatio: Float,
+    selectedLensRole: LensRole = LensRole.PRIMARY,
+    digitalZoomRatio: Float = 1.0f,
     exposure: Float,
     flashMode: Int,
     isFrontCamera: Boolean,
@@ -255,9 +212,7 @@ fun CameraPreviewView(
 
     val previewView = remember {
         PreviewView(context).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
@@ -276,7 +231,7 @@ fun CameraPreviewView(
 
     LaunchedEffect(activeImageCapture) { imageCaptureProvider(activeImageCapture) }
 
-    // Enumerate cameras using LensCatalog for proper physical camera IDs
+    // Enumerate cameras
     LaunchedEffect(Unit) {
         val catalog = LensCatalog(context)
         val result = catalog.enumerate()
@@ -284,50 +239,54 @@ fun CameraPreviewView(
         onLensCatalogReady?.invoke(result)
     }
 
-    // Bind camera with physical camera targeting support
-    LaunchedEffect(isFrontCamera, cameraProviderFuture) {
+    // Bind camera — rebinds on lens role or front/back change
+    LaunchedEffect(selectedLensRole, isFrontCamera) {
+        val cp = try { cameraProviderFuture.get() } catch (e: Exception) { null } ?: return@LaunchedEffect
         val executor = ContextCompat.getMainExecutor(context)
-        cameraProviderFuture.addListener({
-            try {
-                val cp = cameraProviderFuture.get()
+
+        try {
+            if (isFrontCamera) {
+                val cs = CameraSelector.DEFAULT_FRONT_CAMERA
+                cp.unbindAll()
+                camera = cp.bindToLifecycle(lifecycleOwner, cs,
+                    Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) },
+                    imageCapture)
+                activeImageCapture = imageCapture
+            } else {
+                val catalog = LensCatalog(context)
+                val result = catalog.enumerate()
+                val targetProfile = when (selectedLensRole) {
+                    LensRole.ULTRA_WIDE -> result.ultraWide
+                    LensRole.PRIMARY -> result.primary
+                    LensRole.TELE -> result.tele
+                }
 
                 val previewManager = PreviewSessionManager(context, lifecycleOwner)
-                val preview = Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) }
+                val bound = if (targetProfile != null) {
+                    previewManager.bindPreview(
+                        cameraProvider = cp,
+                        logicalCameraId = targetProfile.logicalCameraId,
+                        physicalCameraId = targetProfile.physicalCameraId,
+                        surfaceProvider = previewView.surfaceProvider,
+                        flashMode = flashMode
+                    )
+                } else null
 
-                if (isFrontCamera) {
-                    val cs = CameraSelector.DEFAULT_FRONT_CAMERA
+                if (bound == null) {
+                    val cs = CameraSelector.DEFAULT_BACK_CAMERA
                     cp.unbindAll()
-                    camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
+                    camera = cp.bindToLifecycle(lifecycleOwner, cs,
+                        Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) },
+                        imageCapture)
                     activeImageCapture = imageCapture
                 } else {
-                    // For the back camera, target the Primary physical lens directly so that
-                    // capture-time lens swaps (to Tele/UW) hit the right physical sub-camera.
-                    // Fall back to the default back camera if physical targeting isn't available.
-                    val catalog = LensCatalog(context)
-                    val result = catalog.enumerate()
-                    val primaryLens = result.primary
-                    val bound = if (primaryLens != null) {
-                        previewManager.bindPreview(
-                            cameraProvider = cp,
-                            physicalCameraId = primaryLens.physicalCameraId,
-                            surfaceProvider = previewView.surfaceProvider,
-                            flashMode = flashMode
-                        )
-                    } else null
-                    if (bound == null) {
-                        val cs = CameraSelector.DEFAULT_BACK_CAMERA
-                        cp.unbindAll()
-                        camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
-                        activeImageCapture = imageCapture
-                    } else {
-                        camera = bound.camera
-                        activeImageCapture = bound.imageCapture
-                    }
+                    camera = bound.camera
+                    activeImageCapture = bound.imageCapture
                 }
-            } catch (e: Exception) {
-                Log.e("CameraPreviewView", "Failed to bind camera lifecycle", e)
             }
-        }, executor)
+        } catch (e: Exception) {
+            Log.e("CameraPreviewView", "Failed to bind camera lifecycle", e)
+        }
     }
 
     // Keep preview at 1.0x zoom
@@ -353,9 +312,7 @@ fun CameraPreviewView(
     }
 
     LaunchedEffect(flashMode, camera) {
-        camera?.let { c ->
-            try { c.cameraControl.enableTorch(flashMode == 1) } catch (e: Exception) {}
-        }
+        camera?.let { c -> try { c.cameraControl.enableTorch(flashMode == 1) } catch (e: Exception) {} }
         activeImageCapture.flashMode = when (flashMode) {
             0 -> ImageCapture.FLASH_MODE_AUTO
             1 -> ImageCapture.FLASH_MODE_ON
@@ -363,15 +320,8 @@ fun CameraPreviewView(
         }
     }
 
-    // Zoom gesture handling. Supports two input modes:
-    //  - Pinch (multi-touch): relative zoom, unchanged from before.
-    //  - Vertical drag (single touch): swipe up = zoom in, swipe down = zoom out.
-    //    Uses a low-sensitivity exponential mapping so the whole 1x-10x range is reachable
-    //    without a huge swipe, but fine control near 1x stays smooth.
-    //
-    // `pointerInput(Unit)` + rememberUpdatedState keeps the gesture alive across zoom updates
-    // (the old `pointerInput(zoomRatio)` restarted on every tick, interrupting mid-drag).
-    val currentZoomRatio by rememberUpdatedState(zoomRatio)
+    // Zoom gesture — seed from current digitalZoomRatio
+    val currentDigitalZoom by rememberUpdatedState(digitalZoomRatio)
     val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
     val currentOnZoomTick by rememberUpdatedState(onZoomTick)
 
@@ -381,9 +331,8 @@ fun CameraPreviewView(
             val heightPx = size.height.toFloat().coerceAtLeast(1f)
             awaitEachGesture {
                 awaitFirstDown(requireUnconsumed = false)
-                // Seed the gesture-local zoom from the latest VM value so per-event
-                // accumulation doesn't suffer from state round-trip lag.
-                var runningZoom = currentZoomRatio
+                // Seed from the current VM value so the gesture doesn't jump
+                var runningZoom = currentDigitalZoom
                 var lastTick = tickIndexOf(runningZoom)
                 do {
                     val event = awaitPointerEvent(PointerEventPass.Main)
@@ -391,26 +340,21 @@ fun CameraPreviewView(
                     if (pointers.isEmpty()) break
 
                     val newZoom = if (pointers.size >= 2) {
-                        // Multi-touch pinch
                         val pinchFactor = event.calculateZoom()
                         if (pinchFactor == 1.0f) null
-                        else (runningZoom * pinchFactor).coerceIn(0.5f, 5.0f)
+                        else (runningZoom * pinchFactor).coerceIn(1.0f, 3.0f)
                     } else {
-                        // Single-touch vertical drag → zoom (up = zoom in).
                         val dragPx = -event.calculatePan().y
                         if (dragPx == 0f) null
                         else {
                             val fractionalDrag = dragPx / heightPx
-                            // Low sensitivity: ~0.7 of the screen height is one e-fold of zoom.
-                            (runningZoom * kotlin.math.exp(fractionalDrag / 0.7f))
-                                .coerceIn(0.5f, 5.0f)
+                            (runningZoom * kotlin.math.exp(fractionalDrag / 0.7f)).coerceIn(1.0f, 3.0f)
                         }
                     }
 
                     if (newZoom != null) {
                         runningZoom = newZoom
                         currentOnZoomChanged(newZoom)
-                        // Haptic "notch" in log-space: one tick each time zoom crosses ~8%.
                         val tick = tickIndexOf(newZoom)
                         if (tick != lastTick) {
                             lastTick = tick
@@ -423,10 +367,6 @@ fun CameraPreviewView(
     )
 }
 
-/**
- * Groups zoom values into discrete haptic notches in log-space.
- * One notch per ~8% relative change → ~28 ticks across the 1x-10x range.
- */
 private fun tickIndexOf(zoom: Float): Int {
     if (zoom <= 0f) return 0
     return (kotlin.math.ln(zoom) / kotlin.math.ln(1.08f)).toInt()

@@ -74,6 +74,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -111,9 +112,6 @@ import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
 
-// How long the white shutter flash stays fully opaque before it begins fading out.
-// Kept short (independent of capture latency) so a lens-swap capture doesn't leave a
-// lingering white screen. The AnimatedVisibility exit tween fades it out afterwards.
 private const val FLASH_BURST_DURATION_MS = 120L
 
 @OptIn(ExperimentalPermissionsApi::class)
@@ -124,17 +122,15 @@ fun CameraUi(
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
 
-    // Observe permission state
     val cameraPermissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
 
-    // Trigger photos loading on start
     LaunchedEffect(Unit) {
         viewModel.loadPhotos(context)
     }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF121212) // True retro slate dark
+        color = Color(0xFF121212)
     ) {
         if (cameraPermissionState.status.isGranted) {
             CameraActiveScreen(viewModel = viewModel)
@@ -228,10 +224,9 @@ fun CameraActiveScreen(
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
 
-    // Observe state flows
-    val zoomRatio by viewModel.zoomRatio.collectAsState()
-    val focalLength by viewModel.focalLength.collectAsState()
-    val baseFocalLength by viewModel.baseFocalLength.collectAsState()
+    val selectedLensRole by viewModel.selectedLensRole.collectAsState()
+    val effectiveFocalLength by viewModel.effectiveFocalLength.collectAsState()
+    val digitalZoomRatio by viewModel.digitalZoomRatio.collectAsState()
     val exposure by viewModel.exposure.collectAsState()
     val temperature by viewModel.temperature.collectAsState()
     val flashMode by viewModel.flashMode.collectAsState()
@@ -241,18 +236,15 @@ fun CameraActiveScreen(
     val boxScale by viewModel.boxScale.collectAsState()
     val previewLensRole by viewModel.previewLensRole.collectAsState()
     val captureLensRole by viewModel.captureLensRole.collectAsState()
+    val lensSwitchTrigger by viewModel.lensSwitchTrigger.collectAsState()
 
     val showTempSlider by viewModel.showTemperatureSlider.collectAsState()
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
 
-    // Create executors for CameraX operations
     val mainExecutor = ContextCompat.getMainExecutor(context)
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
 
-    // Floating UI flash visual effect. This is a fixed-duration shutter burst — it
-    // intentionally does NOT wait for capture completion, which previously made the
-    // white screen linger for the entire (sometimes multi-second) lens-swap capture.
     var flashFlashActive by remember { mutableStateOf(false) }
     LaunchedEffect(flashFlashActive) {
         if (flashFlashActive) {
@@ -274,10 +266,12 @@ fun CameraActiveScreen(
         val totalWidth = maxWidth
         val totalHeight = maxHeight
 
-        // 1. Camera Viewfinder Background
+        // 1. Camera Viewfinder Background — full remount on lens switch for clean pipeline
+        key(lensSwitchTrigger) {
         CameraPreviewView(
             modifier = Modifier.fillMaxSize(),
-            zoomRatio = zoomRatio,
+            selectedLensRole = selectedLensRole,
+            digitalZoomRatio = digitalZoomRatio,
             exposure = exposure,
             flashMode = flashMode,
             isFrontCamera = isFrontCamera,
@@ -289,8 +283,9 @@ fun CameraActiveScreen(
             imageCaptureProvider = { activeImageCapture = it },
             onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
+        }
 
-        // Color overlay to simulate warming / cooling retro tint on preview dynamically
+        // Color overlay for retro tint
         if (temperature != 0f) {
             Box(
                 modifier = Modifier
@@ -305,43 +300,47 @@ fun CameraActiveScreen(
             )
         }
 
-        // Box scale from FovMapper: previewFocalMm / targetFocalMm
-        // Represents the fraction of the viewfinder covered by the zoom box
+        // Box scale animation
         val animatedBoxWidthFraction by animateFloatAsState(
             targetValue = boxScale,
             animationSpec = spring(stiffness = 200f, dampingRatio = 0.75f),
             label = "box_width_fraction"
         )
 
-        // 2. Cinematic Translucent Viewfinder Mask (Darkening outside the Zoom Box)
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val boxW = size.width * animatedBoxWidthFraction
-            val boxH = boxW * 1.35f // Retro 4:3 style framing box aspect
-            val left = (size.width - boxW) / 2f
-            // Adjust the top coordinate to match the exact actual rendered position of the white box
-            val top = (size.height - boxH) / 2f
+        val showZoomBox = selectedLensRole == LensRole.PRIMARY && animatedBoxWidthFraction < 0.99f
 
-            val rect = Rect(left, top, left + boxW, top + boxH)
-            val path = Path().apply {
-                addRoundRect(RoundRect(rect = rect, cornerRadius = CornerRadius(20.dp.toPx())))
-            }
+        // 2. Cinematic Viewfinder Mask — only on Primary with zoom
+        if (showZoomBox) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val boxW = size.width * animatedBoxWidthFraction
+                val boxH = boxW * 1.35f
+                val left = (size.width - boxW) / 2f
+                val top = (size.height - boxH) / 2f
 
-            // Darken outside of our custom zoom box crop area
-            clipPath(path = path, clipOp = ClipOp.Difference) {
-                drawRect(color = Color.Black.copy(alpha = 0.65f))
+                val rect = Rect(left, top, left + boxW, top + boxH)
+                val path = Path().apply {
+                    addRoundRect(RoundRect(rect = rect, cornerRadius = CornerRadius(20.dp.toPx())))
+                }
+                clipPath(path = path, clipOp = ClipOp.Difference) {
+                    drawRect(color = Color.Black.copy(alpha = 0.65f))
+                }
             }
         }
 
-        // 3a. Focal length label — positioned independently above the zoom box
-        val boxTopOffset = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2f).dp
+        // 3a. Lens label at top
+        val boxTopOffset = if (showZoomBox) {
+            ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2f).dp
+        } else 0.dp
+
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = boxTopOffset - 32.dp),
+                .offset(y = if (showZoomBox) boxTopOffset - 32.dp else 8.dp),
             contentAlignment = Alignment.Center
         ) {
+            val lensLabel = "${effectiveFocalLength}mm"
             Text(
-                text = "${focalLength}mm",
+                text = lensLabel,
                 fontSize = 13.sp,
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
@@ -349,29 +348,29 @@ fun CameraActiveScreen(
             )
         }
 
-        // 3b. Zoom Box outline
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .offset(y = boxTopOffset)
-                .fillMaxWidth(animatedBoxWidthFraction)
-                .aspectRatio(1f / 1.35f)
-                .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
-        ) {
-            // Empty zoom box — clean framing only
+        // 3b. Zoom Box outline — only on Primary lens
+        if (showZoomBox) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .offset(y = boxTopOffset)
+                    .fillMaxWidth(animatedBoxWidthFraction)
+                    .aspectRatio(1f / 1.35f)
+                    .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
+            )
         }
 
-        // 4. Compact Floating Capsule Controls below the Zoom Box
+        // 4. Controls capsule — positioned above bottom deck
         Box(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .offset(y = (((totalHeight.value - (totalWidth.value * 0.85f * 1.35f)) / 2.3f + 6) + (totalWidth.value * 0.85f * 1.35f) + 16).dp)
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 176.dp)
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // Interactive slider pops out dynamically directly above the control capsule
+                // Slider popup
                 AnimatedVisibility(
                     visible = showTempSlider || showExpSlider,
                     enter = fadeIn() + slideInVertically(initialOffsetY = { 20 }),
@@ -391,37 +390,15 @@ fun CameraActiveScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(
-                                        text = "Cool",
-                                        color = Color(0xFF0EA5E9),
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Text(
-                                        text = "Temp (${if (temperature >= 0) "+" else ""}${String.format("%.1f", temperature)})",
-                                        color = Color.White,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Text(
-                                        text = "Warm",
-                                        color = Color(0xFFF59E0B),
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
+                                    Text("Cool", color = Color(0xFF0EA5E9), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                    Text("Temp (${if (temperature >= 0) "+" else ""}${String.format("%.1f", temperature)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                    Text("Warm", color = Color(0xFFF59E0B), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                                 }
                                 Slider(
                                     value = temperature,
-                                    onValueChange = {
-                                        viewModel.setTemperature(it)
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
+                                    onValueChange = { viewModel.setTemperature(it); haptic.performHapticFeedback(HapticFeedbackType.LongPress) },
                                     valueRange = -2f..2f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = Color.White,
-                                        activeTrackColor = Color(0xFFF59E0B),
-                                        inactiveTrackColor = Color(0xFF4B5563)
+                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color(0xFFF59E0B), inactiveTrackColor = Color(0xFF4B5563)
                                     )
                                 )
                             }
@@ -431,37 +408,15 @@ fun CameraActiveScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text(
-                                        text = "- EV",
-                                        color = Color.LightGray,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Text(
-                                        text = "Exposure (${if (exposure >= 0) "+" else ""}${String.format("%.1f", exposure)})",
-                                        color = Color.White,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Text(
-                                        text = "+ EV",
-                                        color = Color.LightGray,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
+                                    Text("- EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                    Text("Exposure (${if (exposure >= 0) "+" else ""}${String.format("%.1f", exposure)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                                    Text("+ EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
                                 }
                                 Slider(
                                     value = exposure,
-                                    onValueChange = {
-                                        viewModel.setExposure(it)
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    },
+                                    onValueChange = { viewModel.setExposure(it); haptic.performHapticFeedback(HapticFeedbackType.LongPress) },
                                     valueRange = -3f..3f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = Color.White,
-                                        activeTrackColor = Color(0xFFFBBF24),
-                                        inactiveTrackColor = Color(0xFF4B5563)
+                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color(0xFFFBBF24), inactiveTrackColor = Color(0xFF4B5563)
                                     )
                                 )
                             }
@@ -469,7 +424,7 @@ fun CameraActiveScreen(
                     }
                 }
 
-                // The physical black adjustment capsule
+                // Control capsule
                 Row(
                     modifier = Modifier
                         .background(Color(0xFF1C1C1E), RoundedCornerShape(32.dp))
@@ -478,15 +433,10 @@ fun CameraActiveScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    // Temperature trigger button
+                    // Temperature
                     IconButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.toggleTemperatureSlider()
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = if (showTempSlider) Color(0xFF2C2C2E) else Color.Transparent
-                        ),
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() },
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = if (showTempSlider) Color(0xFF2C2C2E) else Color.Transparent),
                         modifier = Modifier.size(44.dp)
                     ) {
                         Icon(
@@ -497,26 +447,20 @@ fun CameraActiveScreen(
                         )
                     }
 
-                    // Focal length / Lens switcher presets circle (cycles through common presets)
+                    // Lens selector
                     Box(
                         modifier = Modifier
                             .size(44.dp)
                             .background(Color(0xFF2C2C2E), CircleShape)
                             .clickable {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                // Cycle through common target focal lengths: 35 → 50 → 85 → 135 → back to 35
-                                val nextPreset = when {
-                                    focalLength <= 42 -> 50
-                                    focalLength <= 65 -> 85
-                                    focalLength <= 110 -> 135
-                                    else -> 35
-                                }
-                                viewModel.selectLensPreset(nextPreset)
+                                viewModel.cycleLens()
                             },
                         contentAlignment = Alignment.Center
                     ) {
+                        val lensLabel = "${effectiveFocalLength}"
                         Text(
-                            text = "${focalLength}",
+                            text = lensLabel,
                             color = Color.White,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
@@ -524,15 +468,10 @@ fun CameraActiveScreen(
                         )
                     }
 
-                    // Exposure trigger button
+                    // Exposure
                     IconButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.toggleExposureSlider()
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = if (showExpSlider) Color(0xFF2C2C2E) else Color.Transparent
-                        ),
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleExposureSlider() },
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = if (showExpSlider) Color(0xFF2C2C2E) else Color.Transparent),
                         modifier = Modifier.size(44.dp)
                     ) {
                         Icon(
@@ -546,22 +485,16 @@ fun CameraActiveScreen(
             }
         }
 
-        // 5. White flash burst transition overlay.
-        // The visible-state lifetime is driven by the LaunchedEffect above (fixed burst),
-        // not by capture completion, so it's the same quick flash regardless of capture latency.
+        // 5. White flash overlay
         AnimatedVisibility(
             visible = flashFlashActive,
             enter = fadeIn(animationSpec = tween(40)),
             exit = fadeOut(animationSpec = tween(150))
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.White)
-            )
+            Box(modifier = Modifier.fillMaxSize().background(Color.White))
         }
 
-        // 6. Camera Bottom Deck Controls
+        // 6. Bottom Deck Controls
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -570,13 +503,11 @@ fun CameraActiveScreen(
                 .padding(bottom = 36.dp, top = 20.dp)
                 .padding(horizontal = 24.dp)
         ) {
-            // Use a centered Box so the shutter sits perfectly in the middle,
-            // with the gallery pinned left and flash/flip pinned right.
             Box(
                 modifier = Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                // Left: Instant circular polaroid gallery button
+                // Gallery button (left)
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
@@ -610,7 +541,7 @@ fun CameraActiveScreen(
                     }
                 }
 
-                // Center: Tactile retro Shutter Button (silver metallic ring, crimson center)
+                // Shutter Button
                 Box(
                     modifier = Modifier
                         .size(80.dp)
@@ -623,183 +554,71 @@ fun CameraActiveScreen(
                             if (captureDevice != null) {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 viewModel.playShutterSound()
-
-                                // Trigger brief flash screen feedback
                                 flashFlashActive = true
 
-                                // Two capture paths:
-                                // 1) Same lens (Primary or front camera) →
-                                //    triggerImageCapture via CameraX (fast path).
-                                // 2) Different lens (Tele/UW) →
-                                //    captureWithCamera2 via Camera2 API directly,
-                                //    keeping CameraX preview streaming on Primary.
-                                val needsLensSwap = !isFrontCamera && captureLensRole != LensRole.PRIMARY
+                                val catalog = LensCatalog(context)
+                                val result = catalog.enumerate()
+                                val isDigitalZoomActive = selectedLensRole == LensRole.PRIMARY
+                                val nativeFocalForCrop = if (isDigitalZoomActive) result.primary?.equivFocalMm else null
 
-                                if (needsLensSwap) {
-                                    // Find the target lens profile for Camera2 capture
-                                    val catalog = LensCatalog(context)
-                                    val result = catalog.enumerate()
-                                    val targetProfile = when (captureLensRole) {
-                                        LensRole.ULTRA_WIDE -> result.ultraWide
-                                        LensRole.TELE -> result.tele
-                                        else -> null
-                                    }
-
-                                    if (targetProfile != null &&
-                                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
-                                    ) {
-                                        // When capturing through a different physical lens (UW/Tele),
-                                        // tell the post-processor the lens's native focal length so
-                                        // the crop is computed from the capture lens rather than the
-                                        // preview lens — previewFocal/targetFocal would be too aggressive.
-                                        val nativeFocal = targetProfile.equivFocalMm
-                                        captureWithCamera2(
+                                triggerImageCapture(
+                                    context = context,
+                                    imageCapture = captureDevice,
+                                    executor = mainExecutor,
+                                    onCaptured = { rawFile ->
+                                        viewModel.processAndSavePhoto(
                                             context = context,
-                                            targetLogicalId = targetProfile.logicalCameraId,
-                                            targetPhysicalId = targetProfile.physicalCameraId,
-                                            targetFocalLength = focalLength,
-                                            flashMode = flashMode,
-                                            onCaptured = { rawFile ->
-                                                viewModel.processAndSavePhoto(
-                                                    context = context,
-                                                    rawFile = rawFile,
-                                                    boxWidthFraction = animatedBoxWidthFraction,
-                                                    screenWidth = totalWidth.value,
-                                                    screenHeight = totalHeight.value,
-                                                    captureFocalLength = focalLength,
-                                                    captureLensNativeFocalMm = nativeFocal
-                                                )
-                                            },
-                                            onError = { exc ->
-                                                Log.e("CameraActiveScreen",
-                                                    "Camera2 capture failed, falling back", exc)
-                                                // Fallback: capture from Primary
-                                                triggerImageCapture(
-                                                    context = context,
-                                                    imageCapture = captureDevice,
-                                                    executor = mainExecutor,
-                                                    onCaptured = { rawFile ->
-                                                        viewModel.processAndSavePhoto(
-                                                            context = context,
-                                                            rawFile = rawFile,
-                                                            boxWidthFraction = animatedBoxWidthFraction,
-                                                            screenWidth = totalWidth.value,
-                                                            screenHeight = totalHeight.value,
-                                                            captureFocalLength = focalLength
-                                                        )
-                                                    },
-                                                    onCaptureError = { fallbackExc ->
-                                                        Log.e("CameraActiveScreen",
-                                                            "Fallback capture also failed",
-                                                            fallbackExc)
-                                                    }
-                                                )
-                                            }
+                                            rawFile = rawFile,
+                                            boxWidthFraction = animatedBoxWidthFraction,
+                                            screenWidth = totalWidth.value,
+                                            screenHeight = totalHeight.value,
+                                            captureFocalLength = effectiveFocalLength,
+                                            captureLensNativeFocalMm = nativeFocalForCrop
                                         )
-                                    } else {
-                                        // Fallback: no target profile or API < 28
-                                        triggerImageCapture(
-                                            context = context,
-                                            imageCapture = captureDevice,
-                                            executor = mainExecutor,
-                                            onCaptured = { rawFile ->
-                                                viewModel.processAndSavePhoto(
-                                                    context = context,
-                                                    rawFile = rawFile,
-                                                    boxWidthFraction = animatedBoxWidthFraction,
-                                                    screenWidth = totalWidth.value,
-                                                    screenHeight = totalHeight.value,
-                                                    captureFocalLength = focalLength
-                                                )
-                                            },
-                                            onCaptureError = { exc ->
-                                                Log.e("CameraActiveScreen",
-                                                    "Capture failed", exc)
-                                            }
-                                        )
+                                    },
+                                    onCaptureError = { exc ->
+                                        Log.e("CameraActiveScreen", "Capture failed", exc)
                                     }
-                                } else {
-                                    // Same lens: CameraX fast path
-                                    triggerImageCapture(
-                                        context = context,
-                                        imageCapture = captureDevice,
-                                        executor = mainExecutor,
-                                        onCaptured = { rawFile ->
-                                            viewModel.processAndSavePhoto(
-                                                context = context,
-                                                rawFile = rawFile,
-                                                boxWidthFraction = animatedBoxWidthFraction,
-                                                screenWidth = totalWidth.value,
-                                                screenHeight = totalHeight.value,
-                                                captureFocalLength = focalLength
-                                            )
-                                        },
-                                        onCaptureError = { exc ->
-                                            Log.e("CameraActiveScreen",
-                                                "Capture failed", exc)
-                                        }
-                                    )
-                                }
+                                )
                             }
                         },
                     contentAlignment = Alignment.Center
                 ) {
-                    val scale by animateFloatAsState(
+                    val s by animateFloatAsState(
                         targetValue = if (isCapturing) 0.85f else 1.0f,
                         animationSpec = spring(dampingRatio = 0.6f),
                         label = "shutter_scale"
                     )
                     Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .scale(scale)
-                            .background(Color(0xFFEF4444), CircleShape) // Crimson vintage trigger button
+                        modifier = Modifier.fillMaxSize().scale(s).background(Color(0xFFEF4444), CircleShape)
                     )
                 }
 
-                // Right: Row for Camera Flip & Flash triggers
+                // Flash & Flip (right)
                 Row(
                     modifier = Modifier.align(Alignment.CenterEnd),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Flash Mode selection icon
+                    // Flash
                     IconButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.toggleFlash()
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = Color(0xFF1C1C1E)
-                        ),
-                        modifier = Modifier
-                            .size(44.dp)
-                            .testTag("flash_toggle_button")
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleFlash() },
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
+                        modifier = Modifier.size(44.dp).testTag("flash_toggle_button")
                     ) {
                         Icon(
-                            imageVector = when (flashMode) {
-                                0 -> Icons.Rounded.FlashAuto
-                                1 -> Icons.Rounded.FlashOn
-                                else -> Icons.Rounded.FlashOff
-                            },
+                            imageVector = when (flashMode) { 0 -> Icons.Rounded.FlashAuto; 1 -> Icons.Rounded.FlashOn; else -> Icons.Rounded.FlashOff },
                             contentDescription = "Toggle Flash",
                             tint = if (flashMode == 2) Color.Gray else Color(0xFFFBBF24),
                             modifier = Modifier.size(18.dp)
                         )
                     }
 
-                    // Lens/Camera Rotator flip button
+                    // Flip camera
                     IconButton(
-                        onClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.toggleCamera()
-                        },
-                        colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = Color(0xFF1C1C1E)
-                        ),
-                        modifier = Modifier
-                            .size(44.dp)
-                            .testTag("camera_flip_button")
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleCamera() },
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
+                        modifier = Modifier.size(44.dp).testTag("camera_flip_button")
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.FlipCameraAndroid,
@@ -812,7 +631,7 @@ fun CameraActiveScreen(
             }
         }
 
-        // 7. Interactive Detail Photo Fullscreen Overlay (Retro Polaroid Viewer)
+        // 7. Photo Viewer Overlay
         AnimatedVisibility(
             visible = selectedPhoto != null,
             enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
@@ -825,9 +644,7 @@ fun CameraActiveScreen(
                     allPhotos = capturedPhotos,
                     viewModel = viewModel,
                     onClose = { viewModel.setSelectedPhoto(null) },
-                    onDelete = { file ->
-                        viewModel.deletePhoto(context, file)
-                    },
+                    onDelete = { file -> viewModel.deletePhoto(context, file) },
                     onSelectPhoto = { viewModel.setSelectedPhoto(it) }
                 )
             }
@@ -847,202 +664,109 @@ fun PhotoViewerOverlay(
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
 
-    // Read EXIF data on first composition and whenever photo changes
     var exifData by remember(photo) { mutableStateOf(ExifData()) }
-    LaunchedEffect(photo) {
-        exifData = viewModel.readExifData(photo)
-    }
+    LaunchedEffect(photo) { exifData = viewModel.readExifData(photo) }
 
-    // Device model name (user-facing)
     val phoneName = Build.MODEL
-
     BackHandler(onBack = onClose)
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .padding(top = 16.dp)
+        modifier = Modifier.fillMaxSize().background(Color.Black).padding(top = 16.dp)
     ) {
         // Upper Title Deck
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             IconButton(
-                onClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onClose()
-                },
+                onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onClose() },
                 colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E))
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "Close Viewfinder",
-                    tint = Color.White
-                )
+                Icon(imageVector = Icons.Rounded.Close, contentDescription = "Close Viewfinder", tint = Color.White)
             }
 
             Text(
                 text = "CPM VINTAGE ROLL",
-                fontSize = 15.sp,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp,
-                fontFamily = FontFamily.Monospace
+                fontSize = 15.sp, color = Color.White, fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp, fontFamily = FontFamily.Monospace
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Share button
                 IconButton(
                     onClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         try {
-                            val uri: Uri = FileProvider.getUriForFile(
-                                context,
-                                "${context.packageName}.fileprovider",
-                                photo
-                            )
+                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", photo)
                             val intent = Intent(Intent.ACTION_SEND).apply {
                                 type = "image/jpeg"
                                 putExtra(Intent.EXTRA_STREAM, uri)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             context.startActivity(Intent.createChooser(intent, "Share Retro Photo"))
-                        } catch (e: Exception) {
-                            Log.e("PhotoViewerOverlay", "Error sharing photo", e)
-                        }
+                        } catch (e: Exception) { Log.e("PhotoViewerOverlay", "Error sharing photo", e) }
                     },
                     colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E))
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Share,
-                        contentDescription = "Share retro capture",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    Icon(imageVector = Icons.Rounded.Share, contentDescription = "Share retro capture", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
 
-                // Delete button
                 IconButton(
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onDelete(photo)
-                    },
+                    onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete(photo) },
                     colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF2A1C1C))
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Delete,
-                        contentDescription = "Delete captured photo",
-                        tint = Color(0xFFEF4444),
-                        modifier = Modifier.size(18.dp)
-                    )
+                    Icon(imageVector = Icons.Rounded.Delete, contentDescription = "Delete captured photo", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
                 }
             }
         }
 
-        // Center visual component: Large image framed with stylish polaroid padding
+        // Photo Card
         Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp),
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
             contentAlignment = Alignment.Center
         ) {
             Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f / 1.28f), // Polaroid proportion framing
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f / 1.28f),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FAF9)),
                 shape = RoundedCornerShape(12.dp),
                 elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(12.dp)
-                ) {
-                    // Actual photo capture
+                Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
                     Image(
                         painter = rememberAsyncImagePainter(model = photo),
                         contentDescription = "Enlarged capture",
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .clip(RoundedCornerShape(8.dp))
+                        modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(8.dp))
                     )
-
                     Spacer(modifier = Modifier.height(14.dp))
-
-                    // Retro info bar: phone name left, exif details right
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Phone / device model name
-                        Text(
-                            text = phoneName,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Normal,
-                            color = Color.Black.copy(alpha = 0.55f),
-                            fontFamily = FontFamily.Serif,
-                            modifier = Modifier.padding(horizontal = 4.dp)
-                        )
-                        // Focal length, shutter speed, ISO
-                        Text(
-                            text = "${exifData.focalLength}  ${exifData.shutterSpeed}  ${exifData.iso}",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Normal,
-                            color = Color.Black.copy(alpha = 0.55f),
-                            fontFamily = FontFamily.Serif,
-                            modifier = Modifier.padding(horizontal = 4.dp)
-                        )
+                        Text(text = phoneName, fontSize = 12.sp, fontWeight = FontWeight.Normal, color = Color.Black.copy(alpha = 0.55f), fontFamily = FontFamily.Serif, modifier = Modifier.padding(horizontal = 4.dp))
+                        Text(text = "${exifData.focalLength}  ${exifData.shutterSpeed}  ${exifData.iso}", fontSize = 12.sp, fontWeight = FontWeight.Normal, color = Color.Black.copy(alpha = 0.55f), fontFamily = FontFamily.Serif, modifier = Modifier.padding(horizontal = 4.dp))
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
                 }
             }
         }
 
-        // Horizontal bottom drawer roll for fast thumbnail selections
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF0D0D0D))
-                .padding(vertical = 16.dp)
-        ) {
+        // Filmstrip
+        Spacer(modifier = Modifier.height(16.dp))
+        Box(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                items(allPhotos) { thumb ->
-                    val isSelected = thumb == photo
+                items(items = allPhotos, key = { it.absolutePath }) { item ->
+                    val isSelected = item == photo
                     Box(
                         modifier = Modifier
-                            .size(54.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .border(
-                                width = if (isSelected) 2.dp else 1.dp,
-                                color = if (isSelected) Color(0xFFF59E0B) else Color.White.copy(alpha = 0.15f),
-                                shape = RoundedCornerShape(8.dp)
-                            )
-                            .clickable {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onSelectPhoto(thumb)
-                            }
+                            .size(62.dp).clip(RoundedCornerShape(6.dp))
+                            .border(width = if (isSelected) 3.dp else 0.dp, color = if (isSelected) Color(0xFFF59E0B) else Color.Transparent, shape = RoundedCornerShape(6.dp))
+                            .clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onSelectPhoto(item) }
                     ) {
-                        Image(
-                            painter = rememberAsyncImagePainter(model = thumb),
-                            contentDescription = "Miniature selection",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        Image(painter = rememberAsyncImagePainter(model = item), contentDescription = "Filmstrip photo", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
                 }
             }
