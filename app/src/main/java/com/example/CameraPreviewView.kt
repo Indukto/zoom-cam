@@ -90,22 +90,26 @@ fun captureWithCamera2(
 
     try {
         val characteristics = cameraManager.getCameraCharacteristics(targetLogicalId)
-        val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val outputSizes = configMap?.getOutputSizes(ImageFormat.JPEG)
-        val size = outputSizes?.maxByOrNull { it.width * it.height }
-        if (size == null) { cleanup(); onError(RuntimeException("No JPEG output size")); return }
 
-        val imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
-
-        // Read sensor orientation from the **physical** sub-camera (not the logical camera),
-        // because UW / Tele sensors often have a different physical mounting rotation
-        // than the Primary. Ignoring this causes a 90° (or similar) rotation error.
+        // Read physical sub-camera characteristics first so we use the correct
+        // sensor orientation AND the correct (native) output resolution. The
+        // logical camera's SCALER_STREAM_CONFIGURATION_MAP may only include
+        // Primary-lens resolutions; using them for UW/Tele forces upscaling
+        // and causes visible pixelation / noise.
         val physicalChars = try {
             cameraManager.getCameraCharacteristics(targetPhysicalId)
         } catch (_: Exception) {
             characteristics
         }
         val sensorOrientation = physicalChars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+
+        val configMap = physicalChars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?: characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val outputSizes = configMap?.getOutputSizes(ImageFormat.JPEG)
+        val size = outputSizes?.maxByOrNull { it.width * it.height }
+        if (size == null) { cleanup(); onError(RuntimeException("No JPEG output size")); return }
+
+        val imageReader = ImageReader.newInstance(size.width, size.height, ImageFormat.JPEG, 2)
 
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val deviceRotation = when (windowManager.defaultDisplay.rotation) {

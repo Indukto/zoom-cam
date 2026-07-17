@@ -648,6 +648,11 @@ fun CameraActiveScreen(
                                     if (targetProfile != null &&
                                         Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
                                     ) {
+                                        // When capturing through a different physical lens (UW/Tele),
+                                        // tell the post-processor the lens's native focal length so
+                                        // the crop is computed from the capture lens rather than the
+                                        // preview lens — previewFocal/targetFocal would be too aggressive.
+                                        val nativeFocal = targetProfile.equivFocalMm
                                         captureWithCamera2(
                                             context = context,
                                             targetLogicalId = targetProfile.logicalCameraId,
@@ -661,7 +666,8 @@ fun CameraActiveScreen(
                                                     boxWidthFraction = animatedBoxWidthFraction,
                                                     screenWidth = totalWidth.value,
                                                     screenHeight = totalHeight.value,
-                                                    captureFocalLength = focalLength
+                                                    captureFocalLength = focalLength,
+                                                    captureLensNativeFocalMm = nativeFocal
                                                 )
                                             },
                                             onError = { exc ->

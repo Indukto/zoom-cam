@@ -293,7 +293,8 @@ class CameraViewModel : ViewModel() {
         boxWidthFraction: Float,
         screenWidth: Float,
         screenHeight: Float,
-        captureFocalLength: Int
+        captureFocalLength: Int,
+        captureLensNativeFocalMm: Float? = null
     ) {
         _isCapturing.value = true
         val currentAspectRatioMultiplier = if (_aspectRatio.value == "1:1") 1.0f else 1.35f
@@ -357,9 +358,39 @@ class CameraViewModel : ViewModel() {
                         bitmap = rotatedBitmap
                     }
 
-                    // 2. Crop the image to the exact Zoom Box bounds visible on screen
-                    // Skip crop if the box covers nearly the entire frame (>= 99%)
-                    val finalBitmap = if (boxWidthFraction < 0.99f) {
+                    // 2. Crop the image to match the target focal length.
+                    //
+                    // When a lens-swap capture occurred (captureLensNativeFocalMm != null),
+                    // the image was taken with a different physical lens than the preview.
+                    // In that case the on-screen zoom box (computed from previewFocalMm / targetFocalMm)
+                    // does NOT represent the correct crop — it would be far too aggressive.
+                    // Instead we compute the crop directly from the capture lens's native focal length:
+                    //   cropFactor = captureLensNativeFocalMm / captureFocalLength
+                    // and apply it as a center-crop on the full-resolution capture.
+                    //
+                    // For same-lens captures (captureLensNativeFocalMm == null), we keep the
+                    // existing screen-coordinate zoom-box crop.
+                    val finalBitmap = if (captureLensNativeFocalMm != null) {
+                        val cropFactor = (captureLensNativeFocalMm / captureFocalLength).coerceIn(0f, 1f)
+                        if (cropFactor < 0.99f) {
+                            val cropW = (bitmap.width * cropFactor).toInt().coerceAtLeast(1)
+                            val cropH = (bitmap.height * cropFactor).toInt().coerceAtLeast(1)
+                            val cropX = (bitmap.width - cropW) / 2
+                            val cropY = (bitmap.height - cropH) / 2
+                            try {
+                                val cropped = Bitmap.createBitmap(bitmap, cropX, cropY, cropW, cropH)
+                                if (cropped != bitmap) {
+                                    bitmap.recycle()
+                                }
+                                cropped
+                            } catch (e: Exception) {
+                                Log.e("CameraViewModel", "Error center-cropping bitmap, fallback to full image", e)
+                                bitmap
+                            }
+                        } else {
+                            bitmap
+                        }
+                    } else if (boxWidthFraction < 0.99f) {
                         val cropped = try {
                             cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
                         } catch (e: Exception) {
