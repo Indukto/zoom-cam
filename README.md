@@ -8,6 +8,10 @@ Featuring a unique "Zoom Box" framing interface, it simulates the experience of 
 
 ---
 
+
+[![Screenshot-20260717-165407.png](https://i.postimg.cc/9FDzv1xx/Screenshot-20260717-165407.png)](https://postimg.cc/ZChTNPz3)
+
+
 ## ✨ Key Features
 
 *   **Cinematic Zoom Box**: A signature 4:3 framing overlay that guides your composition and defines the final crop area.
