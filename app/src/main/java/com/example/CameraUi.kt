@@ -319,7 +319,7 @@ fun CameraActiveScreen(
             val boxH = boxW * 1.35f // Retro 4:3 style framing box aspect
             val left = (size.width - boxW) / 2f
             // Adjust the top coordinate to match the exact actual rendered position of the white box
-            val top = (size.height - boxH) / 2.3f + 6.dp.toPx()
+            val top = (size.height - boxH) / 2f
 
             val rect = Rect(left, top, left + boxW, top + boxH)
             val path = Path().apply {
@@ -333,7 +333,7 @@ fun CameraActiveScreen(
         }
 
         // 3a. Focal length label — positioned independently above the zoom box
-        val boxTopOffset = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f + 6).dp
+        val boxTopOffset = ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2f).dp
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)

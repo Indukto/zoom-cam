@@ -16,6 +16,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.zoom.FovMapper
 import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
+import com.example.zoom.ZoomBoxCalculator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -144,13 +145,13 @@ class CameraViewModel : ViewModel() {
 
     /**
      * Pinch-to-zoom gesture handler.
-     * Maps a zoom ratio to a target focal length based on the current base lens.
+     * Maps a zoom ratio (0.5×–5.0× relative to 25mm normal) to a target focal length
+     * using ZoomBoxCalculator.
      */
     fun setZoom(ratio: Float) {
-        val clampedRatio = ratio.coerceIn(1.0f, 10.0f)
-        val base = _baseFocalLength.value
-        // Map the zoom ratio to a target focal length
-        val targetFocal = (base * clampedRatio).toInt().coerceIn(13, 200)
+        val clampedRatio = ratio.coerceIn(0.5f, 5.0f)
+        val targetFocal = ZoomBoxCalculator.zoomRatioToFocalLength(clampedRatio)
+            .toInt().coerceIn(13, 200)
         applyLensSelection(targetFocal)
     }
 
@@ -163,45 +164,25 @@ class CameraViewModel : ViewModel() {
     }
 
     /**
-     * Core lens selection algorithm using FovMapper.
+     * Core lens selection algorithm using FovMapper and ZoomBoxCalculator.
      *
-     * 1. Find the best physical lens on the device where f_lens ≤ f_target
-     * 2. Determine the preview lens (FovMapper.previewLens)
-     * 3. Determine the capture lens with hysteresis (FovMapper.captureLens)
-     * 4. Calculate box scale = previewFocal / targetFocal
-     * 5. Calculate digital zoom factor Z = target / base
-     * 6. Update all state flows accordingly
+     * 1. Always use the Ultra-wide lens as viewfinder (maximum context)
+     * 2. Determine the capture lens with hysteresis (FovMapper.captureLens)
+     * 3. Calculate box scale = ultraWideFocal / targetFocal
+     * 4. Calculate zoom ratio = targetFocal / 25mm reference
+     * 5. Update all state flows accordingly
      */
     private fun applyLensSelection(targetFocalLength: Int) {
-        val available = _availableFocalLengths.value
-
-        // Step 1: Find the best physical lens (largest focal length ≤ target)
-        val bestBase = available
-            .filter { it <= targetFocalLength }
-            .maxOrNull()
-            ?: available.minOrNull() // fallback: widest lens
-            ?: 24f
-
-        val baseInt = bestBase.toInt()
-
-        // Step 2: Get catalog data for FovMapper.
-        // Prefer real per-lens focals from the catalog; fall back to sane defaults.
-        // The preview lens is ALWAYS the Primary (tele is never used for preview per spec §3),
-        // so the box scale is computed off the Primary's focal length regardless of capture lens.
+        // Step 1: Get catalog data for FovMapper.
         val catalog = lensCatalogResult
         val primaryFocalMm = catalog?.primary?.equivFocalMm ?: 24f
         val ultraWideFocalMm = catalog?.ultraWide?.equivFocalMm ?: 13.4f
         val teleFocalMm = catalog?.tele?.equivFocalMm ?: 116.2f
 
-        // Step 3: Determine preview lens using FovMapper
-        val previewRole = FovMapper.previewLens(
-            targetFocalMm = targetFocalLength.toFloat(),
-            primaryFocalMm = primaryFocalMm,
-            ultraWideFocalMm = ultraWideFocalMm
-        )
-        _previewLensRole.value = previewRole
+        // Step 2: Preview is always Ultra-wide
+        _previewLensRole.value = LensRole.ULTRA_WIDE
 
-        // Step 4: Determine capture lens with hysteresis
+        // Step 3: Determine capture lens with hysteresis
         val currentCapture = _captureLensRole.value
         val captureRole = FovMapper.captureLens(
             targetFocalMm = targetFocalLength.toFloat(),
@@ -212,22 +193,18 @@ class CameraViewModel : ViewModel() {
         )
         _captureLensRole.value = captureRole
 
-        // Step 5: Compute box scale
-        val previewFocal = when (previewRole) {
-            LensRole.ULTRA_WIDE -> ultraWideFocalMm
-            LensRole.PRIMARY -> primaryFocalMm
-            LensRole.TELE -> primaryFocalMm // Tele never used for preview
-        }
-        val scale = FovMapper.boxScale(previewFocal, targetFocalLength.toFloat())
+        // Step 4: Compute box scale = ultraWideFocal / targetFocal
+        val scale = FovMapper.boxScale(ultraWideFocalMm, targetFocalLength.toFloat())
         _boxScale.value = scale
 
-        // Step 6: Calculate digital zoom factor
-        val zoom = targetFocalLength.toFloat() / bestBase
-
-        // Step 7: Update state
-        _baseFocalLength.value = baseInt
+        // Step 5: Update state
+        _baseFocalLength.value = when (captureRole) {
+            LensRole.ULTRA_WIDE -> ultraWideFocalMm.toInt()
+            LensRole.PRIMARY -> primaryFocalMm.toInt()
+            LensRole.TELE -> teleFocalMm.toInt()
+        }
         _focalLength.value = targetFocalLength
-        _zoomRatio.value = zoom
+        _zoomRatio.value = ZoomBoxCalculator.focalLengthToZoomRatio(targetFocalLength.toFloat())
     }
 
     fun setExposure(value: Float) {
@@ -555,7 +532,7 @@ class CameraViewModel : ViewModel() {
         val wBox = screenWidth * boxWidthFraction
         val hBox = wBox * aspectRatioMultiplier
         val xBox = (screenWidth - wBox) / 2f
-        val yBox = (screenHeight - hBox) / 2.3f + 6f
+        val yBox = (screenHeight - hBox) / 2f
 
         // Map screen Zoom Box to Bitmap coordinates
         val xCropStart = (xVisibleStart + (xBox / screenWidth) * wVisible).toInt().coerceIn(0, bitmap.width - 1)

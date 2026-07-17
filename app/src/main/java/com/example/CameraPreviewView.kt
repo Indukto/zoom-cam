@@ -394,7 +394,7 @@ fun CameraPreviewView(
                         // Multi-touch pinch
                         val pinchFactor = event.calculateZoom()
                         if (pinchFactor == 1.0f) null
-                        else (runningZoom * pinchFactor).coerceIn(1.0f, 10.0f)
+                        else (runningZoom * pinchFactor).coerceIn(0.5f, 5.0f)
                     } else {
                         // Single-touch vertical drag → zoom (up = zoom in).
                         val dragPx = -event.calculatePan().y
@@ -403,7 +403,7 @@ fun CameraPreviewView(
                             val fractionalDrag = dragPx / heightPx
                             // Low sensitivity: ~0.7 of the screen height is one e-fold of zoom.
                             (runningZoom * kotlin.math.exp(fractionalDrag / 0.7f))
-                                .coerceIn(1.0f, 10.0f)
+                                .coerceIn(0.5f, 5.0f)
                         }
                     }
 

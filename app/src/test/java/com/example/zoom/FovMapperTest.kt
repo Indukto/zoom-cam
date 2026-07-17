@@ -87,63 +87,63 @@ class FovMapperTest {
     // --- previewLens tests ---
 
     @Test
-    fun `previewLens below primary focal uses ultraWide`() {
+    fun `previewLens always returns ultraWide regardless of target`() {
         val lens = FovMapper.previewLens(
             targetFocalMm = 15f,
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("Below 24mm, preview should use ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
+        assertEquals("Preview should always be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
     }
 
     @Test
-    fun `previewLens at primary focal uses Primary`() {
+    fun `previewLens at primary focal still returns ultraWide`() {
         val lens = FovMapper.previewLens(
             targetFocalMm = PRIMARY_FOCAL_MM,
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("At 24mm, preview should use PRIMARY", LensRole.PRIMARY, lens)
+        assertEquals("At 24mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
     }
 
     @Test
-    fun `previewLens at 50mm uses Primary`() {
+    fun `previewLens at 50mm still returns ultraWide`() {
         val lens = FovMapper.previewLens(
             targetFocalMm = 50f,
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("At 50mm, preview should use PRIMARY", LensRole.PRIMARY, lens)
+        assertEquals("At 50mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
     }
 
     @Test
-    fun `previewLens at 85mm uses Primary`() {
+    fun `previewLens at 85mm still returns ultraWide`() {
         val lens = FovMapper.previewLens(
             targetFocalMm = 85f,
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("At 85mm, preview should use PRIMARY", LensRole.PRIMARY, lens)
+        assertEquals("At 85mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
     }
 
     @Test
-    fun `previewLens at 116dot2mm uses Primary (Tele never used for preview)`() {
+    fun `previewLens at 116dot2mm returns ultraWide (Tele never used for preview)`() {
         val lens = FovMapper.previewLens(
             targetFocalMm = TELE_FOCAL_MM,
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("At 116.2mm, preview should still be PRIMARY", LensRole.PRIMARY, lens)
+        assertEquals("At 116.2mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
     }
 
     @Test
-    fun `previewLens at 200mm uses Primary`() {
+    fun `previewLens at 200mm returns ultraWide`() {
         val lens = FovMapper.previewLens(
             targetFocalMm = 200f,
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("At 200mm, preview should still be PRIMARY", LensRole.PRIMARY, lens)
+        assertEquals("At 200mm, preview should be ULTRA_WIDE", LensRole.ULTRA_WIDE, lens)
     }
 
     // --- captureLens tests ---
@@ -374,7 +374,7 @@ class FovMapperTest {
     }
 
     @Test
-    fun `acceptance criteria 2 - at 85mm box scale is approx 0dot282, preview is Primary`() {
+    fun `acceptance criteria 2 - at 85mm box scale is approx 0dot282, preview is UltraWide`() {
         val scale = FovMapper.boxScale(PRIMARY_FOCAL_MM, 85f)
         val expected = PRIMARY_FOCAL_MM / 85f
         assertEquals("AC2: At 85mm, box scale ≈ 0.282", expected, scale, 0.001f)
@@ -384,11 +384,11 @@ class FovMapperTest {
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("AC2: Preview lens should still be Primary", LensRole.PRIMARY, previewLens)
+        assertEquals("AC2: Preview lens should be UltraWide", LensRole.ULTRA_WIDE, previewLens)
     }
 
     @Test
-    fun `acceptance criteria 3 - at exactly 116dot2mm capture switches to Tele, preview unchanged`() {
+    fun `acceptance criteria 3 - at exactly 116dot2mm capture switches to Tele, preview stays UW`() {
         val captureLens = FovMapper.captureLens(
             targetFocalMm = TELE_FOCAL_MM,
             currentCaptureLens = LensRole.PRIMARY,
@@ -403,7 +403,7 @@ class FovMapperTest {
             primaryFocalMm = PRIMARY_FOCAL_MM,
             ultraWideFocalMm = UW_FOCAL_MM
         )
-        assertEquals("AC3: Preview lens remains Primary", LensRole.PRIMARY, previewLens)
+        assertEquals("AC3: Preview lens stays UltraWide", LensRole.ULTRA_WIDE, previewLens)
     }
 
     @Test

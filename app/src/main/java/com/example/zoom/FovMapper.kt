@@ -35,9 +35,9 @@ object FovMapper {
     /**
      * Determines which lens should be used for the live preview.
      *
-     * The preview lens is chosen for *context* (showing the whole scene):
-     * - Below the Primary's focal length, use the Ultra-wide
-     * - At or above the Primary's focal length, use the Primary
+     * The Ultra-wide lens is always used as the viewfinder so the user sees
+     * maximum context at every zoom level. The zoom-box overlay then indicates
+     * which portion of the scene will be captured.
      *
      * The Tele lens is never used for preview — it's only switched in at capture time.
      */
@@ -46,10 +46,7 @@ object FovMapper {
         primaryFocalMm: Float,
         ultraWideFocalMm: Float
     ): LensRole {
-        return when {
-            targetFocalMm < primaryFocalMm -> LensRole.ULTRA_WIDE
-            else -> LensRole.PRIMARY
-        }
+        return LensRole.ULTRA_WIDE
     }
 
     /**
