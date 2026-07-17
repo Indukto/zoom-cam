@@ -150,7 +150,8 @@ private fun SpectrumSlider(
     leftTick: String,
     centerTick: String,
     rightTick: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    step: Float? = null   // when non-null, the value snaps to multiples of `step`
 ) {
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
@@ -163,9 +164,17 @@ private fun SpectrumSlider(
 
     val notchOffsetDp = with(density) { (trackWidthPx * fraction).toDp() }
 
+    // Quantize a raw value to the step grid (if any), clamped to the range.
+    fun snap(v: Float): Float {
+        if (step == null || step <= 0f) return v.coerceIn(min, max)
+        val snapped = kotlin.math.round(v / step) * step
+        // Drop float drift so 0.1 steps stay clean (0.1, 0.2, ... not 0.30000004).
+        return (kotlin.math.round(snapped * 1000f) / 1000f).coerceIn(min, max)
+    }
+
     fun pxToValue(px: Float): Float {
         val f = (px / trackWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
-        return min + f * range
+        return snap(min + f * range)
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -229,14 +238,14 @@ private fun SpectrumSlider(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(valueRange) {
+                    .pointerInput(valueRange, step) {
                         detectTapGestures(
                             onTap = { offset ->
                                 onValueChange(pxToValue(offset.x))
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             },
                             onDoubleTap = {
-                                onValueChange(0f.coerceIn(valueRange))
+                                onValueChange(snap(0f))
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             }
                         )
@@ -244,8 +253,13 @@ private fun SpectrumSlider(
                     .draggable(
                         orientation = androidx.compose.foundation.gestures.Orientation.Horizontal,
                         state = rememberDraggableState { delta ->
-                            val dValue = (delta / trackWidthPx.coerceAtLeast(1f)) * range
-                            onValueChange((value + dValue).coerceIn(min, max))
+                            // Track the last *snapped* value so we can tick the
+                            // haptic exactly when crossing into a new step.
+                            val target = snap(value + (delta / trackWidthPx.coerceAtLeast(1f)) * range)
+                            if (step != null && target != snap(value)) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            onValueChange(target)
                         },
                         onDragStarted = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -381,7 +395,8 @@ private fun ExposurePanel(
             valueLabel = "${evLabel}EV",
             leftTick = "-3",
             centerTick = "0",
-            rightTick = "+3"
+            rightTick = "+3",
+            step = 0.1f   // snap to 1/10 EV stops like a typical camera
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
