@@ -124,19 +124,19 @@ fun captureWithBestLens(
     val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     val rotation = windowManager.defaultDisplay.rotation
 
-    val cameraSelector = if (!isFrontCamera && baseFocalLength > 0) {
-        buildCameraSelectorForLens(context, baseFocalLength)
+    val cameraSelector = if (!isFrontCamera && targetFocalLength > 0) {
+        buildCameraSelectorForLens(context, targetFocalLength)
     } else {
         if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
     }
 
     // Find the target physical lens ID if we're doing a lens-switched capture
     var targetPhysicalId: String? = null
-    if (!isFrontCamera && baseFocalLength > 0) {
+    if (!isFrontCamera && targetFocalLength > 0) {
         val catalog = LensCatalog(context)
         val result = catalog.enumerate()
         val targetLens = result.allLenses.minByOrNull {
-            kotlin.math.abs(it.equivFocalMm - baseFocalLength)
+            kotlin.math.abs(it.equivFocalMm - targetFocalLength)
         }
         targetPhysicalId = targetLens?.physicalCameraId
     }
@@ -192,19 +192,51 @@ fun captureWithBestLens(
  * This is used to resume the wide-angle preview after a lens-switched capture.
  */
 fun rebindDefaultCamera(
+    context: Context,
     cameraProvider: ProcessCameraProvider,
     lifecycleOwner: LifecycleOwner,
     surfaceProvider: Preview.SurfaceProvider,
     isFrontCamera: Boolean,
-    imageCapture: ImageCapture
+    imageCapture: ImageCapture,
+    flashMode: Int = 0,
+    onActiveImageCaptureChanged: (ImageCapture) -> Unit = {}
 ) {
-    val preview = Preview.Builder().build().apply { setSurfaceProvider(surfaceProvider) }
-    val cameraSelector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
-    try {
-        cameraProvider.unbindAll()
-        cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture)
-    } catch (e: Exception) {
-        Log.e("CameraPreviewView", "Error rebinding default camera", e)
+    if (isFrontCamera) {
+        val preview = Preview.Builder().build().apply { setSurfaceProvider(surfaceProvider) }
+        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+        try {
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture)
+            onActiveImageCaptureChanged(imageCapture)
+        } catch (e: Exception) {
+            Log.e("CameraPreviewView", "Error rebinding default camera", e)
+        }
+    } else {
+        val previewManager = PreviewSessionManager(context, lifecycleOwner)
+        val catalog = LensCatalog(context)
+        val result = catalog.enumerate()
+        val primaryLens = result.primary
+        val bound = if (primaryLens != null) {
+            previewManager.bindPreview(
+                cameraProvider = cameraProvider,
+                physicalCameraId = primaryLens.physicalCameraId,
+                surfaceProvider = surfaceProvider,
+                flashMode = flashMode
+            )
+        } else null
+        if (bound == null) {
+            val preview = Preview.Builder().build().apply { setSurfaceProvider(surfaceProvider) }
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture)
+                onActiveImageCaptureChanged(imageCapture)
+            } catch (e: Exception) {
+                Log.e("CameraPreviewView", "Error rebinding default camera", e)
+            }
+        } else {
+            onActiveImageCaptureChanged(bound.imageCapture)
+        }
     }
 }
 

@@ -286,6 +286,58 @@ fun CameraActiveScreen(
         val totalWidth = maxWidth
         val totalHeight = maxHeight
 
+        // Settings Menu UI for Unit Tests
+        var showSettingsMenu by remember { mutableStateOf(false) }
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 16.dp, end = 16.dp)
+        ) {
+            IconButton(
+                onClick = { showSettingsMenu = !showSettingsMenu },
+                modifier = Modifier.size(44.dp).testTag("settings_menu_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.FlipCameraAndroid,
+                    contentDescription = "Settings",
+                    tint = Color.White
+                )
+            }
+
+            if (showSettingsMenu) {
+                Column(
+                    modifier = Modifier
+                        .padding(top = 48.dp)
+                        .background(Color(0xFF1E1E1E), RoundedCornerShape(8.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clickable {
+                                viewModel.toggleGridLines()
+                                showSettingsMenu = false
+                            }
+                            .testTag("menu_item_grid_lines")
+                            .padding(8.dp)
+                    ) {
+                        Text("Toggle Grid Lines", color = Color.White)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clickable {
+                                viewModel.setAspectRatio(if (viewModel.aspectRatio.value == "4:3") "1:1" else "4:3")
+                                showSettingsMenu = false
+                            }
+                            .testTag("menu_item_aspect_ratio")
+                            .padding(8.dp)
+                    ) {
+                        Text("Toggle Aspect Ratio", color = Color.White)
+                    }
+                }
+            }
+        }
+
         // 1. Camera Viewfinder Background
         CameraPreviewView(
             modifier = Modifier.fillMaxSize(),
@@ -378,7 +430,7 @@ fun CameraActiveScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .offset(y = (((totalHeight.value - (totalWidth.value * 0.85f * 1.35f)) / 2.3f + 6) + (totalWidth.value * 0.85f * 1.35f) + 16).dp)
+                .offset(y = (((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2.3f + 6) + (totalWidth.value * animatedBoxWidthFraction * 1.35f) + 16).dp)
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -660,11 +712,14 @@ fun CameraActiveScreen(
                                             executor = mainExecutor,
                                             rebindPreview = {
                                                 rebindDefaultCamera(
+                                                    context = context,
                                                     cameraProvider = handle.cameraProvider,
                                                     lifecycleOwner = lifecycleOwner,
                                                     surfaceProvider = handle.surfaceProvider,
                                                     isFrontCamera = isFrontCamera,
-                                                    imageCapture = captureDevice
+                                                    imageCapture = captureDevice,
+                                                    flashMode = flashMode,
+                                                    onActiveImageCaptureChanged = { activeImageCapture = it }
                                                 )
                                             },
                                             onCaptured = { rawFile ->

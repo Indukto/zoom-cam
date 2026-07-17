@@ -191,7 +191,8 @@ class CameraViewModel : ViewModel() {
         val catalog = lensCatalogResult
         val primaryFocalMm = catalog?.primary?.equivFocalMm ?: 24f
         val ultraWideFocalMm = catalog?.ultraWide?.equivFocalMm ?: 13.4f
-        val teleFocalMm = catalog?.tele?.equivFocalMm ?: 116.2f
+        val hasTele = catalog?.tele != null
+        val teleFocalMm = if (hasTele) catalog?.tele?.equivFocalMm ?: 116.2f else Float.MAX_VALUE
 
         // Step 3: Determine preview lens using FovMapper
         val previewRole = FovMapper.previewLens(
@@ -361,7 +362,7 @@ class CameraViewModel : ViewModel() {
                     // Skip crop if the box covers nearly the entire frame (>= 99%)
                     val finalBitmap = if (boxWidthFraction < 0.99f) {
                         val cropped = try {
-                            cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
+                            cropBitmapToZoomBox(context, bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
                         } catch (e: Exception) {
                             Log.e("CameraViewModel", "Error cropping bitmap, fallback to full image", e)
                             bitmap
@@ -394,13 +395,17 @@ class CameraViewModel : ViewModel() {
                     val focalDir = rawFile.parentFile
                     val focalName = rawFile.nameWithoutExtension
                     val focalExt = rawFile.extension
-                    val newName = "${focalName}_${captureFocalLength}mm.$focalExt"
-                    val renamedFile = File(focalDir, newName)
-                    rawFile.renameTo(renamedFile)
+                    val suffix = "_${captureFocalLength}mm"
+                    val finalFile = if (focalName.endsWith(suffix)) {
+                        rawFile
+                    } else {
+                        val destination = File(focalDir, "${focalName}${suffix}.$focalExt")
+                        if (rawFile.renameTo(destination)) destination else rawFile
+                    }
 
                     // 5. Write back EXIF data (Bitmap.compress strips it)
                     try {
-                        val exifOut = ExifInterface(renamedFile.absolutePath)
+                        val exifOut = ExifInterface(finalFile.absolutePath)
                         if (originalExposureTime > 0.0) {
                             exifOut.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, originalExposureTime.toString())
                         }
@@ -414,7 +419,7 @@ class CameraViewModel : ViewModel() {
                     }
 
                     // 6. Save a copy to the public gallery
-                    savePhotoToGallery(context, renamedFile)
+                    savePhotoToGallery(context, finalFile)
                 }
 
                 // Reload photo gallery
@@ -503,6 +508,7 @@ class CameraViewModel : ViewModel() {
     }
 
     private fun cropBitmapToZoomBox(
+        context: Context,
         bitmap: Bitmap,
         boxWidthFraction: Float,
         screenWidth: Float,
@@ -524,7 +530,8 @@ class CameraViewModel : ViewModel() {
         val wBox = screenWidth * boxWidthFraction
         val hBox = wBox * aspectRatioMultiplier
         val xBox = (screenWidth - wBox) / 2f
-        val yBox = (screenHeight - hBox) / 2.3f + 6f
+        val density = context.resources.displayMetrics.density
+        val yBox = (screenHeight - hBox) / 2.3f + (6f * density)
 
         // Map screen Zoom Box to Bitmap coordinates
         val xCropStart = (xVisibleStart + (xBox / screenWidth) * wVisible).toInt().coerceIn(0, bitmap.width - 1)
