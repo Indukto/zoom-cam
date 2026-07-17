@@ -179,7 +179,7 @@ fun CameraPermissionOnboarding(
             fontWeight = FontWeight.Bold,
             color = Color.White,
             letterSpacing = 2.sp,
-            fontFamily = FontFamily.Monospace
+            fontFamily = FontFamily.Serif
         )
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -329,6 +329,18 @@ fun CameraActiveScreen(
         val vfX = (totalWidth - vfWidth) / 2f
 
         if (showZoomBox) {
+            val zoomBoxTop = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
+            // Focal length above zoom box
+            Text(
+                text = "${effectiveFocalLength}mm",
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Serif,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .offset(y = zoomBoxTop - 20.dp)
+            )
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val boxW = vfWidth.toPx() * animatedBoxWidthFraction
                 val boxH = boxW * 1.35f
@@ -387,9 +399,9 @@ fun CameraActiveScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("Cool", color = Color(0xFF0EA5E9), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                                    Text("Temp (${if (temperature >= 0) "+" else ""}${String.format("%.1f", temperature)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                                    Text("Warm", color = Color(0xFFF59E0B), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                    Text("Cool", color = Color(0xFF0EA5E9), fontSize = 11.sp, fontFamily = FontFamily.Default)
+                                    Text("Temp (${if (temperature >= 0) "+" else ""}${String.format("%.1f", temperature)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Default)
+                                    Text("Warm", color = Color(0xFFF59E0B), fontSize = 11.sp, fontFamily = FontFamily.Default)
                                 }
                                 Slider(
                                     value = temperature,
@@ -405,9 +417,9 @@ fun CameraActiveScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("- EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-                                    Text("Exposure (${if (exposure >= 0) "+" else ""}${String.format("%.1f", exposure)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                                    Text("+ EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                                    Text("- EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Default)
+                                    Text("Exposure (${if (exposure >= 0) "+" else ""}${String.format("%.1f", exposure)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Default)
+                                    Text("+ EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Default)
                                 }
                                 Slider(
                                     value = exposure,
@@ -461,7 +473,7 @@ fun CameraActiveScreen(
                             color = Color.White,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace
+                            fontFamily = FontFamily.Serif
                         )
                     }
 
@@ -686,7 +698,7 @@ fun PhotoViewerOverlay(
             Text(
                 text = "CPM VINTAGE ROLL",
                 fontSize = 15.sp, color = Color.White, fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp, fontFamily = FontFamily.Monospace
+                letterSpacing = 1.sp, fontFamily = FontFamily.Serif
             )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
