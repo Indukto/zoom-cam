@@ -23,6 +23,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -66,8 +69,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -87,19 +88,24 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -113,6 +119,278 @@ import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
 
 private const val FLASH_BURST_DURATION_MS = 120L
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Color-temperature & exposure controls
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Maps the app's normalized temperature value (-2 = cool .. +2 = warm) to a
+ * color temperature in Kelvin. Photographically, warmer light = lower Kelvin,
+ * so a positive temp lowers the K value (5600K daylight at neutral).
+ */
+private fun tempToKelvin(temp: Float): Int {
+    val raw = 5600 - (temp * 825f)
+    return (raw / 50f).toInt() * 50
+}
+
+/**
+ * A custom rectangular slider with a multi-color gradient track, a white
+ * indicator notch, a live value chip above the thumb, min/center/max ticks,
+ * and double-tap-to-reset. Reused for both the white-balance and exposure
+ * panels so they share a consistent look and feel.
+ */
+@Composable
+private fun SpectrumSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+    gradient: List<Color>,
+    valueLabel: String,
+    leftTick: String,
+    centerTick: String,
+    rightTick: String,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+
+    var trackWidthPx by remember { mutableStateOf(1f) }
+    val min = valueRange.start
+    val max = valueRange.endInclusive
+    val range = (max - min).coerceAtLeast(0.0001f)
+    val fraction = ((value - min) / range).coerceIn(0f, 1f)
+
+    val notchOffsetDp = with(density) { (trackWidthPx * fraction).toDp() }
+
+    fun pxToValue(px: Float): Float {
+        val f = (px / trackWidthPx.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        return min + f * range
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Box(modifier = Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.BottomStart) {
+            // Value chip floating above the thumb
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(x = (notchOffsetDp - 16.dp).roundToPx(), y = 0) }
+                    .background(Color.White, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = valueLabel,
+                    color = Color.Black,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // Track + thumb + drag/tap handling
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(30.dp)
+                .onGloballyPositioned { trackWidthPx = it.size.width.toFloat() }
+        ) {
+            // Gradient bar
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        brush = Brush.horizontalGradient(gradient),
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(8.dp))
+            )
+
+            // Center (zero) notch — subtle marker on the track
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(width = 2.dp, height = 14.dp)
+                    .background(Color.White.copy(alpha = 0.35f))
+            )
+
+            // Thumb indicator notch
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(x = (notchOffsetDp - 1.5.dp).roundToPx(), y = 0) }
+                    .size(width = 3.dp, height = 38.dp)
+                    .background(Color.White)
+                    .border(1.dp, Color.Black.copy(alpha = 0.25f))
+            )
+
+            // Gesture layer covering the whole track: drag to scrub, tap to set,
+            // double-tap to reset to neutral (0, clamped into range). Track width
+            // is kept current by onGloballyPositioned above, so taps/drags can
+            // convert touch x directly into a value.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(valueRange) {
+                        detectTapGestures(
+                            onTap = { offset ->
+                                onValueChange(pxToValue(offset.x))
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            },
+                            onDoubleTap = {
+                                onValueChange(0f.coerceIn(valueRange))
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            }
+                        )
+                    }
+                    .draggable(
+                        orientation = androidx.compose.foundation.gestures.Orientation.Horizontal,
+                        state = rememberDraggableState { delta ->
+                            val dValue = (delta / trackWidthPx.coerceAtLeast(1f)) * range
+                            onValueChange((value + dValue).coerceIn(min, max))
+                        },
+                        onDragStarted = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        },
+                        startDragImmediately = true
+                    )
+            )
+        }
+
+        // Tick labels
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(text = leftTick, color = Color.White.copy(alpha = 0.55f), fontSize = 9.sp)
+            Text(text = centerTick, color = Color.White.copy(alpha = 0.75f), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            Text(text = rightTick, color = Color.White.copy(alpha = 0.55f), fontSize = 9.sp)
+        }
+    }
+}
+
+/**
+ * White balance (color temperature) panel. Shows a live Kelvin readout and a
+ * color-temperature spectrum strip.
+ */
+@Composable
+private fun WhiteBalancePanel(
+    temperature: Float,
+    onValueChange: (Float) -> Unit
+) {
+    val kValue = tempToKelvin(temperature)
+    val descriptor = when {
+        temperature > 1f -> "Warm"
+        temperature > 0f -> "Slight Warm"
+        temperature < -1f -> "Cool"
+        temperature < 0f -> "Slight Cool"
+        else -> "Daylight"
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "WHITE BALANCE",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "$kValue K · $descriptor",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Serif
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        SpectrumSlider(
+            value = temperature,
+            onValueChange = onValueChange,
+            valueRange = -2f..2f,
+            gradient = listOf(
+                Color(0xFF1D4ED8),  // deep blue (cool / high K)
+                Color(0xFF7DD3FC),  // light cyan
+                Color(0xFFF8FAFC),  // neutral white
+                Color(0xFFFDE68A),  // warm white
+                Color(0xFFF59E0B),  // amber
+                Color(0xFF9F1F4B)   // deep magenta-red (warm / low K)
+            ),
+            valueLabel = "${kValue}K",
+            leftTick = "9000K",
+            centerTick = "5600K",
+            rightTick = "2300K"
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "double-tap to reset",
+            color = Color.White.copy(alpha = 0.35f),
+            fontSize = 8.sp
+        )
+    }
+}
+
+/**
+ * Exposure compensation panel. Shows a live EV readout and a brightness ramp.
+ */
+@Composable
+private fun ExposurePanel(
+    exposure: Float,
+    onValueChange: (Float) -> Unit
+) {
+    val evLabel = if (exposure >= 0) "+${String.format("%.1f", exposure)}" else String.format("%.1f", exposure)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "EXPOSURE",
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Text(
+                text = "$evLabel EV",
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Serif
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        SpectrumSlider(
+            value = exposure,
+            onValueChange = onValueChange,
+            valueRange = -3f..3f,
+            gradient = listOf(
+                Color(0xFF000000),  // black (underexposed)
+                Color(0xFF3F3F46),  // dark gray
+                Color(0xFFA1A1AA),  // mid gray
+                Color(0xFFE5E7EB),  // bright
+                Color(0xFFFBBF24)   // warm highlight
+            ),
+            valueLabel = "${evLabel}EV",
+            leftTick = "-3",
+            centerTick = "0",
+            rightTick = "+3"
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "double-tap to reset",
+            color = Color.White.copy(alpha = 0.35f),
+            fontSize = 8.sp
+        )
+    }
+}
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
@@ -281,10 +559,11 @@ fun CameraActiveScreen(
                 .offset(y = vfTop)
                 .width(vfWidth)
                 .height(vfHeight)
+                .clip(RoundedCornerShape(16.dp))
         ) {
         key(lensSwitchTrigger) {
         CameraPreviewView(
-            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)),
+            modifier = Modifier.fillMaxSize(),
             selectedLensRole = selectedLensRole,
             digitalZoomRatio = digitalZoomRatio,
             exposure = exposure,
@@ -299,9 +578,9 @@ fun CameraActiveScreen(
             onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
         }
-        }
 
-        // Color overlay for retro tint
+        // Color overlay for retro tint — scoped to the viewfinder so it never
+        // washes over the controls / bottom deck.
         if (temperature != 0f) {
             Box(
                 modifier = Modifier
@@ -314,6 +593,7 @@ fun CameraActiveScreen(
                         }
                     )
             )
+        }
         }
 
         // Box scale animation
@@ -388,47 +668,27 @@ fun CameraActiveScreen(
                     Box(
                         modifier = Modifier
                             .padding(bottom = 12.dp)
-                            .background(Color(0xE61E1E1E), RoundedCornerShape(16.dp))
-                            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(16.dp))
-                            .padding(horizontal = 20.dp, vertical = 10.dp)
-                            .width(240.dp)
+                            .background(Color(0xF21E1E1E), RoundedCornerShape(18.dp))
+                            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
+                            .padding(horizontal = 18.dp, vertical = 14.dp)
+                            .width(300.dp)
                     ) {
                         if (showTempSlider) {
-                            Column {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text("Cool", color = Color(0xFF0EA5E9), fontSize = 11.sp, fontFamily = FontFamily.Default)
-                                    Text("Temp (${if (temperature >= 0) "+" else ""}${String.format("%.1f", temperature)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Default)
-                                    Text("Warm", color = Color(0xFFF59E0B), fontSize = 11.sp, fontFamily = FontFamily.Default)
+                            WhiteBalancePanel(
+                                temperature = temperature,
+                                onValueChange = {
+                                    viewModel.setTemperature(it)
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
-                                Slider(
-                                    value = temperature,
-                                    onValueChange = { viewModel.setTemperature(it); haptic.performHapticFeedback(HapticFeedbackType.LongPress) },
-                                    valueRange = -2f..2f,
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color(0xFFF59E0B), inactiveTrackColor = Color(0xFF4B5563)
-                                    )
-                                )
-                            }
+                            )
                         } else if (showExpSlider) {
-                            Column {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text("- EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Default)
-                                    Text("Exposure (${if (exposure >= 0) "+" else ""}${String.format("%.1f", exposure)})", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Default)
-                                    Text("+ EV", color = Color.LightGray, fontSize = 11.sp, fontFamily = FontFamily.Default)
+                            ExposurePanel(
+                                exposure = exposure,
+                                onValueChange = {
+                                    viewModel.setExposure(it)
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
-                                Slider(
-                                    value = exposure,
-                                    onValueChange = { viewModel.setExposure(it); haptic.performHapticFeedback(HapticFeedbackType.LongPress) },
-                                    valueRange = -3f..3f,
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color(0xFFFBBF24), inactiveTrackColor = Color(0xFF4B5563)
-                                    )
-                                )
-                            }
+                            )
                         }
                     }
                 }
