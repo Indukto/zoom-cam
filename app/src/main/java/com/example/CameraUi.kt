@@ -174,7 +174,7 @@ fun CameraPermissionOnboarding(
         Spacer(modifier = Modifier.height(32.dp))
 
         Text(
-            text = "ZOOMBOX CAMERA",
+            text = "ZOOM CAMERA",
             fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
             color = Color.White,
@@ -266,10 +266,25 @@ fun CameraActiveScreen(
         val totalWidth = maxWidth
         val totalHeight = maxHeight
 
-        // 1. Camera Viewfinder Background — full remount on lens switch for clean pipeline
+        // Viewfinder bounds (4:3 portrait box at top)
+        val vfWidth = totalWidth * 0.92f
+        val vfHeight = vfWidth * 4f / 3f
+        val vfTop = 56.dp
+
+        // 1. Black background
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black))
+
+        // 2. Camera Viewfinder — 4:3 box at top with rounded corners
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset(y = vfTop)
+                .width(vfWidth)
+                .height(vfHeight)
+        ) {
         key(lensSwitchTrigger) {
         CameraPreviewView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)),
             selectedLensRole = selectedLensRole,
             digitalZoomRatio = digitalZoomRatio,
             exposure = exposure,
@@ -283,6 +298,7 @@ fun CameraActiveScreen(
             imageCaptureProvider = { activeImageCapture = it },
             onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
+        }
         }
 
         // Color overlay for retro tint
@@ -309,13 +325,15 @@ fun CameraActiveScreen(
 
         val showZoomBox = selectedLensRole == LensRole.PRIMARY && animatedBoxWidthFraction < 0.99f
 
-        // 2. Cinematic Viewfinder Mask — only on Primary with zoom
+        // Zoom box mask — positioned relative to viewfinder
+        val vfX = (totalWidth - vfWidth) / 2f
+
         if (showZoomBox) {
             Canvas(modifier = Modifier.fillMaxSize()) {
-                val boxW = size.width * animatedBoxWidthFraction
+                val boxW = vfWidth.toPx() * animatedBoxWidthFraction
                 val boxH = boxW * 1.35f
-                val left = (size.width - boxW) / 2f
-                val top = (size.height - boxH) / 2f
+                val left = vfX.toPx() + (vfWidth.toPx() - boxW) / 2f
+                val top = vfTop.toPx() + (vfHeight.toPx() - boxH) / 2f
 
                 val rect = Rect(left, top, left + boxW, top + boxH)
                 val path = Path().apply {
@@ -325,37 +343,16 @@ fun CameraActiveScreen(
                     drawRect(color = Color.Black.copy(alpha = 0.65f))
                 }
             }
-        }
 
-        // 3a. Lens label at top
-        val boxTopOffset = if (showZoomBox) {
-            ((totalHeight.value - (totalWidth.value * animatedBoxWidthFraction * 1.35f)) / 2f).dp
-        } else 0.dp
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .offset(y = if (showZoomBox) boxTopOffset - 32.dp else 8.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            val lensLabel = "${effectiveFocalLength}mm"
-            Text(
-                text = lensLabel,
-                fontSize = 13.sp,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
-        }
-
-        // 3b. Zoom Box outline — only on Primary lens
-        if (showZoomBox) {
+            // Zoom box outline
             Box(
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset(y = boxTopOffset)
-                    .fillMaxWidth(animatedBoxWidthFraction)
-                    .aspectRatio(1f / 1.35f)
+                    .offset(
+                        x = vfX + (vfWidth - vfWidth * animatedBoxWidthFraction) / 2f,
+                        y = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
+                    )
+                    .width(vfWidth * animatedBoxWidthFraction)
+                    .height(vfWidth * animatedBoxWidthFraction * 1.35f)
                     .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
             )
         }
@@ -364,7 +361,7 @@ fun CameraActiveScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 176.dp)
+                .padding(bottom = 140.dp)
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
