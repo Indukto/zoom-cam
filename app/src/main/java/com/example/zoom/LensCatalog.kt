@@ -36,6 +36,13 @@ class LensCatalog(private val context: Context) {
     /**
      * Enumerates all back-facing cameras and classifies them by role.
      * Call this once at app start and cache the result.
+     *
+     * On logical multi-camera devices (e.g. Pixel 7 Pro) the rear UW / Primary / Tele
+     * lenses are hidden behind a single *logical* camera ID. `cameraIdList` only returns
+     * that logical ID, so to discover each real lens we must expand it via
+     * `getPhysicalCameraIds()` (requires REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA,
+     * API 28+). For each logical back camera we therefore enumerate its physical sub-cameras
+     * as distinct lenses. Devices without a logical multi-camera fall back to the single ID.
      */
     fun enumerate(): CatalogResult {
         val profiles = mutableListOf<LensProfile>()
@@ -50,34 +57,54 @@ class LensCatalog(private val context: Context) {
                 // Only consider back-facing cameras
                 if (facing != CameraCharacteristics.LENS_FACING_BACK) continue
 
-                val focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                val physicalSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                // Is this a logical multi-camera? If so, enumerate each physical lens.
+                // Otherwise treat the camera itself as a single lens.
+                val isLogicalMulti = isLogicalMultiCamera(characteristics)
+                val physicalIds = if (isLogicalMulti) {
+                    getPhysicalCameraIds(characteristics)
+                } else {
+                    listOf(cameraId)
+                }
 
-                if (focalLengths == null || focalLengths.isEmpty()) continue
+                for (physicalId in physicalIds) {
+                    // Physical sub-cameras expose their own per-lens characteristics;
+                    // fall back to the logical camera's if the lookup fails.
+                    val lensChars = try {
+                        cameraManager.getCameraCharacteristics(physicalId)
+                    } catch (e: Exception) {
+                        characteristics
+                    }
 
-                // Use the widest (smallest) focal length as the lens's native focal length
-                val nativeFocalMm = focalLengths[0]
-                val cropFactor = computeCropFactor(physicalSize)
-                val equivFocalMm = nativeFocalMm * cropFactor
+                    val focalLengths = lensChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    val physicalSize = lensChars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
 
-                // Estimate megapixels from sensor size
-                val megapixels = estimateMegapixels(characteristics)
+                    if (focalLengths == null || focalLengths.isEmpty()) continue
 
-                val hasOIS = hasOpticalStabilization(characteristics)
-                val maxAperture = estimateMaxAperture(characteristics)
+                    // Use the widest (smallest) focal length as the lens's native focal length
+                    val nativeFocalMm = focalLengths[0]
+                    val cropFactor = computeCropFactor(physicalSize)
+                    val equivFocalMm = nativeFocalMm * cropFactor
 
-                val role = classifyLens(equivFocalMm)
+                    // Estimate megapixels from sensor size
+                    val megapixels = estimateMegapixels(lensChars)
 
-                profiles.add(
-                    LensProfile(
-                        role = role,
-                        physicalCameraId = cameraId,
-                        equivFocalMm = equivFocalMm,
-                        nativeMegapixels = megapixels,
-                        maxApertureF = maxAperture,
-                        hasOIS = hasOIS
+                    val hasOIS = hasOpticalStabilization(lensChars)
+                    val maxAperture = estimateMaxAperture(lensChars)
+
+                    val role = classifyLens(equivFocalMm)
+
+                    profiles.add(
+                        LensProfile(
+                            role = role,
+                            logicalCameraId = cameraId,
+                            physicalCameraId = physicalId,
+                            equivFocalMm = equivFocalMm,
+                            nativeMegapixels = megapixels,
+                            maxApertureF = maxAperture,
+                            hasOIS = hasOIS
+                        )
                     )
-                )
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error enumerating cameras", e)
@@ -96,6 +123,33 @@ class LensCatalog(private val context: Context) {
             tele = tele,
             allLenses = profiles
         )
+    }
+
+    /**
+     * Returns true if this camera is a logical multi-camera (i.e. a group of
+     * physical lenses exposed under a single logical ID). API 28+.
+     */
+    private fun isLogicalMultiCamera(characteristics: CameraCharacteristics): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) return false
+        val capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return false
+        return capabilities.any {
+            it == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA
+        }
+    }
+
+    /**
+     * Returns the physical camera IDs backing a logical multi-camera.
+     * `getPhysicalCameraIds()` is public since API 28; callers must gate on
+     * [isLogicalMultiCamera] (which is only true on API 28+).
+     */
+    private fun getPhysicalCameraIds(characteristics: CameraCharacteristics): Set<String> {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) return emptySet()
+        return try {
+            characteristics.physicalCameraIds
+        } catch (e: Exception) {
+            Log.e(TAG, "getPhysicalCameraIds not available", e)
+            emptySet()
+        }
     }
 
     /**

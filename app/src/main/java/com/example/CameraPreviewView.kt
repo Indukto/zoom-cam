@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -16,17 +17,24 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
@@ -81,7 +89,7 @@ fun buildCameraSelectorForLens(context: Context, baseFocalLength: Int): CameraSe
         if (targetLens != null) {
             CameraSelector.Builder()
                 .addCameraFilter { cameras ->
-                    cameras.filter { Camera2CameraInfo.from(it).cameraId == targetLens.physicalCameraId }
+                    cameras.filter { Camera2CameraInfo.from(it).cameraId == targetLens.logicalCameraId }
                 }
                 .build()
         } else {
@@ -122,10 +130,24 @@ fun captureWithBestLens(
         if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
     }
 
+    // Find the target physical lens ID if we're doing a lens-switched capture
+    var targetPhysicalId: String? = null
+    if (!isFrontCamera && baseFocalLength > 0) {
+        val catalog = LensCatalog(context)
+        val result = catalog.enumerate()
+        val targetLens = result.allLenses.minByOrNull {
+            kotlin.math.abs(it.equivFocalMm - baseFocalLength)
+        }
+        targetPhysicalId = targetLens?.physicalCameraId
+    }
+
     val tempImageCapture = ImageCapture.Builder()
         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
         .setTargetRotation(rotation)
         .apply {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                targetPhysicalId?.let { Camera2Interop.Extender(this).setPhysicalCameraId(it) }
+            }
             when (flashMode) {
                 0 -> setFlashMode(ImageCapture.FLASH_MODE_AUTO)
                 1 -> setFlashMode(ImageCapture.FLASH_MODE_ON)
@@ -141,7 +163,11 @@ fun captureWithBestLens(
 
     try {
         cameraProvider.unbindAll()
-        val capturePreview = Preview.Builder().build().apply { setSurfaceProvider(surfaceProvider) }
+        val previewBuilder = Preview.Builder()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            targetPhysicalId?.let { Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(it) }
+        }
+        val capturePreview = previewBuilder.build().apply { setSurfaceProvider(surfaceProvider) }
         cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, capturePreview, tempImageCapture)
 
         tempImageCapture.takePicture(outputOptions, executor,
@@ -190,9 +216,11 @@ fun CameraPreviewView(
     flashMode: Int,
     isFrontCamera: Boolean,
     onZoomChanged: (Float) -> Unit,
+    onZoomTick: () -> Unit = {},
     onAvailableFocalLengths: (List<Float>) -> Unit,
     imageCaptureProvider: (ImageCapture) -> Unit,
-    onLensCaptureReady: ((LensCaptureHandle) -> Unit)? = null
+    onLensCaptureReady: ((LensCaptureHandle) -> Unit)? = null,
+    onLensCatalogReady: ((LensCatalog.CatalogResult) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -214,12 +242,14 @@ fun CameraPreviewView(
         ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .setTargetRotation(windowManager.defaultDisplay.rotation)
+            .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
             .build()
     }
 
     var camera by remember { mutableStateOf<Camera?>(null) }
+    var activeImageCapture by remember { mutableStateOf(imageCapture) }
 
-    LaunchedEffect(imageCapture) { imageCaptureProvider(imageCapture) }
+    LaunchedEffect(activeImageCapture) { imageCaptureProvider(activeImageCapture) }
 
     // Expose the camera provider + surface provider as a LensCaptureHandle
     LaunchedEffect(cameraProviderRef) {
@@ -231,8 +261,10 @@ fun CameraPreviewView(
 
     // Enumerate cameras using LensCatalog for proper physical camera IDs
     LaunchedEffect(Unit) {
-        val lengths = getBackCameraFocalLengths(context)
-        onAvailableFocalLengths(lengths)
+        val catalog = LensCatalog(context)
+        val result = catalog.enumerate()
+        onAvailableFocalLengths(result.allLenses.map { it.equivFocalMm }.sorted())
+        onLensCatalogReady?.invoke(result)
     }
 
     // Bind camera with physical camera targeting support
@@ -250,24 +282,30 @@ fun CameraPreviewView(
                     val cs = CameraSelector.DEFAULT_FRONT_CAMERA
                     cp.unbindAll()
                     camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
+                    activeImageCapture = imageCapture
                 } else {
-                    // Use PreviewSessionManager for back camera to enable physical camera targeting
-                    // Enumerate to find the primary back camera
+                    // For the back camera, target the Primary physical lens directly so that
+                    // capture-time lens swaps (to Tele/UW) hit the right physical sub-camera.
+                    // Fall back to the default back camera if physical targeting isn't available.
                     val catalog = LensCatalog(context)
                     val result = catalog.enumerate()
                     val primaryLens = result.primary
-                    if (primaryLens != null) {
-                        camera = previewManager.bindPreview(
+                    val bound = if (primaryLens != null) {
+                        previewManager.bindPreview(
                             cameraProvider = cp,
                             physicalCameraId = primaryLens.physicalCameraId,
                             surfaceProvider = previewView.surfaceProvider,
-                            imageCapture = imageCapture,
                             flashMode = flashMode
                         )
-                    } else {
+                    } else null
+                    if (bound == null) {
                         val cs = CameraSelector.DEFAULT_BACK_CAMERA
                         cp.unbindAll()
                         camera = cp.bindToLifecycle(lifecycleOwner, cs, preview, imageCapture)
+                        activeImageCapture = imageCapture
+                    } else {
+                        camera = bound.camera
+                        activeImageCapture = bound.imageCapture
                     }
                 }
             } catch (e: Exception) {
@@ -302,23 +340,80 @@ fun CameraPreviewView(
         camera?.let { c ->
             try { c.cameraControl.enableTorch(flashMode == 1) } catch (e: Exception) {}
         }
-        imageCapture.flashMode = when (flashMode) {
+        activeImageCapture.flashMode = when (flashMode) {
             0 -> ImageCapture.FLASH_MODE_AUTO
             1 -> ImageCapture.FLASH_MODE_ON
             else -> ImageCapture.FLASH_MODE_OFF
         }
     }
 
+    // Zoom gesture handling. Supports two input modes:
+    //  - Pinch (multi-touch): relative zoom, unchanged from before.
+    //  - Vertical drag (single touch): swipe up = zoom in, swipe down = zoom out.
+    //    Uses a low-sensitivity exponential mapping so the whole 1x-10x range is reachable
+    //    without a huge swipe, but fine control near 1x stays smooth.
+    //
+    // `pointerInput(Unit)` + rememberUpdatedState keeps the gesture alive across zoom updates
+    // (the old `pointerInput(zoomRatio)` restarted on every tick, interrupting mid-drag).
+    val currentZoomRatio by rememberUpdatedState(zoomRatio)
+    val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
+    val currentOnZoomTick by rememberUpdatedState(onZoomTick)
+
     AndroidView(
         factory = { previewView },
-        modifier = modifier.fillMaxSize().pointerInput(zoomRatio) {
-            detectTransformGestures { _, _, zoomFactor, _ ->
-                if (zoomFactor != 1.0f) {
-                    onZoomChanged((zoomRatio * zoomFactor).coerceIn(1.0f, 10.0f))
-                }
+        modifier = modifier.fillMaxSize().pointerInput(Unit) {
+            val heightPx = size.height.toFloat().coerceAtLeast(1f)
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                // Seed the gesture-local zoom from the latest VM value so per-event
+                // accumulation doesn't suffer from state round-trip lag.
+                var runningZoom = currentZoomRatio
+                var lastTick = tickIndexOf(runningZoom)
+                do {
+                    val event = awaitPointerEvent(PointerEventPass.Main)
+                    val pointers = event.changes.filter { it.pressed }
+                    if (pointers.isEmpty()) break
+
+                    val newZoom = if (pointers.size >= 2) {
+                        // Multi-touch pinch
+                        val pinchFactor = event.calculateZoom()
+                        if (pinchFactor == 1.0f) null
+                        else (runningZoom * pinchFactor).coerceIn(1.0f, 10.0f)
+                    } else {
+                        // Single-touch vertical drag → zoom (up = zoom in).
+                        val dragPx = -event.calculatePan().y
+                        if (dragPx == 0f) null
+                        else {
+                            val fractionalDrag = dragPx / heightPx
+                            // Low sensitivity: ~0.7 of the screen height is one e-fold of zoom.
+                            (runningZoom * kotlin.math.exp(fractionalDrag / 0.7f))
+                                .coerceIn(1.0f, 10.0f)
+                        }
+                    }
+
+                    if (newZoom != null) {
+                        runningZoom = newZoom
+                        currentOnZoomChanged(newZoom)
+                        // Haptic "notch" in log-space: one tick each time zoom crosses ~8%.
+                        val tick = tickIndexOf(newZoom)
+                        if (tick != lastTick) {
+                            lastTick = tick
+                            currentOnZoomTick()
+                        }
+                    }
+                } while (event.changes.any { it.pressed })
             }
         }
     )
+}
+
+/**
+ * Groups zoom values into discrete haptic notches in log-space.
+ * One notch per ~8% relative change → ~28 ticks across the 1x-10x range.
+ */
+private fun tickIndexOf(zoom: Float): Int {
+    if (zoom <= 0f) return 0
+    return (kotlin.math.ln(zoom) / kotlin.math.ln(1.08f)).toInt()
 }
 
 fun triggerImageCapture(

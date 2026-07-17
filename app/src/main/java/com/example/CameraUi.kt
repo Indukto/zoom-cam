@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.delay
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -107,12 +108,19 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
+import com.example.zoom.LensCatalog
+import com.example.zoom.LensRole
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+
+// How long the white shutter flash stays fully opaque before it begins fading out.
+// Kept short (independent of capture latency) so a lens-swap capture doesn't leave a
+// lingering white screen. The AnimatedVisibility exit tween fades it out afterwards.
+private const val FLASH_BURST_DURATION_MS = 120L
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
@@ -254,8 +262,16 @@ fun CameraActiveScreen(
     // These are provided by CameraPreviewView via the onLensCaptureReady callback
     var lensCaptureHandle by remember { mutableStateOf<LensCaptureHandle?>(null) }
 
-    // Floating UI flash visual effect
+    // Floating UI flash visual effect. This is a fixed-duration shutter burst — it
+    // intentionally does NOT wait for capture completion, which previously made the
+    // white screen linger for the entire (sometimes multi-second) lens-swap capture.
     var flashFlashActive by remember { mutableStateOf(false) }
+    LaunchedEffect(flashFlashActive) {
+        if (flashFlashActive) {
+            delay(FLASH_BURST_DURATION_MS)
+            flashFlashActive = false
+        }
+    }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -278,9 +294,13 @@ fun CameraActiveScreen(
             flashMode = flashMode,
             isFrontCamera = isFrontCamera,
             onZoomChanged = { viewModel.setZoom(it) },
+            onZoomTick = {
+                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            },
             onAvailableFocalLengths = { viewModel.setAvailableFocalLengths(it) },
             imageCaptureProvider = { activeImageCapture = it },
-            onLensCaptureReady = { handle -> lensCaptureHandle = handle }
+            onLensCaptureReady = { handle -> lensCaptureHandle = handle },
+            onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
 
         // Color overlay to simulate warming / cooling retro tint on preview dynamically
@@ -539,11 +559,13 @@ fun CameraActiveScreen(
             }
         }
 
-        // 5. White flash burst transition overlay
+        // 5. White flash burst transition overlay.
+        // The visible-state lifetime is driven by the LaunchedEffect above (fixed burst),
+        // not by capture completion, so it's the same quick flash regardless of capture latency.
         AnimatedVisibility(
             visible = flashFlashActive,
-            enter = fadeIn(animationSpec = tween(50)),
-            exit = fadeOut(animationSpec = tween(350))
+            enter = fadeIn(animationSpec = tween(40)),
+            exit = fadeOut(animationSpec = tween(150))
         ) {
             Box(
                 modifier = Modifier
@@ -618,55 +640,74 @@ fun CameraActiveScreen(
                                 // Trigger brief flash screen feedback
                                 flashFlashActive = true
 
-                                // Use the best lens for capture: unbind the wide-angle,
-                                // bind the target lens, capture, then rebind wide-angle.
-                                val handle = lensCaptureHandle
+                                // Check if a lens swap is actually needed.
+                                // Preview is always bound to Primary, so if capture lens is also
+                                // Primary (or front camera), use the fast path (no unbind/rebind).
+                                val needsLensSwap = !isFrontCamera && captureLensRole != LensRole.PRIMARY
 
-                                if (handle != null) {
-                                    captureWithBestLens(
-                                        context = context,
-                                        cameraProvider = handle.cameraProvider,
-                                        lifecycleOwner = lifecycleOwner,
-                                        baseFocalLength = baseFocalLength,
-                                        targetFocalLength = focalLength,
-                                        flashMode = flashMode,
-                                        surfaceProvider = handle.surfaceProvider,
-                                        isFrontCamera = isFrontCamera,
-                                        executor = mainExecutor,
-                                        rebindPreview = {
-                                            // After capture, rebind the wide-angle preview
-                                            rebindDefaultCamera(
-                                                cameraProvider = handle.cameraProvider,
-                                                lifecycleOwner = lifecycleOwner,
-                                                surfaceProvider = handle.surfaceProvider,
-                                                isFrontCamera = isFrontCamera,
-                                                imageCapture = captureDevice
-                                            )
-                                        },
-                                        onCaptured = { rawFile ->
-                                            flashFlashActive = false
-                                            viewModel.processAndSavePhoto(
-                                                context = context,
-                                                rawFile = rawFile,
-                                                boxWidthFraction = animatedBoxWidthFraction,
-                                                screenWidth = totalWidth.value,
-                                                screenHeight = totalHeight.value,
-                                                captureFocalLength = focalLength
-                                            )
-                                        },
-                                        onCaptureError = { exc ->
-                                            flashFlashActive = false
-                                            Log.e("CameraActiveScreen", "Capture failed", exc)
-                                        }
-                                    )
+                                if (needsLensSwap) {
+                                    val handle = lensCaptureHandle
+                                    if (handle != null) {
+                                        captureWithBestLens(
+                                            context = context,
+                                            cameraProvider = handle.cameraProvider,
+                                            lifecycleOwner = lifecycleOwner,
+                                            baseFocalLength = baseFocalLength,
+                                            targetFocalLength = focalLength,
+                                            flashMode = flashMode,
+                                            surfaceProvider = handle.surfaceProvider,
+                                            isFrontCamera = isFrontCamera,
+                                            executor = mainExecutor,
+                                            rebindPreview = {
+                                                rebindDefaultCamera(
+                                                    cameraProvider = handle.cameraProvider,
+                                                    lifecycleOwner = lifecycleOwner,
+                                                    surfaceProvider = handle.surfaceProvider,
+                                                    isFrontCamera = isFrontCamera,
+                                                    imageCapture = captureDevice
+                                                )
+                                            },
+                                            onCaptured = { rawFile ->
+                                                viewModel.processAndSavePhoto(
+                                                    context = context,
+                                                    rawFile = rawFile,
+                                                    boxWidthFraction = animatedBoxWidthFraction,
+                                                    screenWidth = totalWidth.value,
+                                                    screenHeight = totalHeight.value,
+                                                    captureFocalLength = focalLength
+                                                )
+                                            },
+                                            onCaptureError = { exc ->
+                                                Log.e("CameraActiveScreen", "Capture failed", exc)
+                                            }
+                                        )
+                                    } else {
+                                        triggerImageCapture(
+                                            context = context,
+                                            imageCapture = captureDevice,
+                                            executor = mainExecutor,
+                                            onCaptured = { rawFile ->
+                                                viewModel.processAndSavePhoto(
+                                                    context = context,
+                                                    rawFile = rawFile,
+                                                    boxWidthFraction = animatedBoxWidthFraction,
+                                                    screenWidth = totalWidth.value,
+                                                    screenHeight = totalHeight.value,
+                                                    captureFocalLength = focalLength
+                                                )
+                                            },
+                                            onCaptureError = { exc ->
+                                                Log.e("CameraActiveScreen", "Capture failed", exc)
+                                            }
+                                        )
+                                    }
                                 } else {
-                                    // Fallback: just use the currently bound imageCapture
+                                    // Fast path: same lens, skip unbind/rebind
                                     triggerImageCapture(
                                         context = context,
                                         imageCapture = captureDevice,
                                         executor = mainExecutor,
                                         onCaptured = { rawFile ->
-                                            flashFlashActive = false
                                             viewModel.processAndSavePhoto(
                                                 context = context,
                                                 rawFile = rawFile,
@@ -677,7 +718,6 @@ fun CameraActiveScreen(
                                             )
                                         },
                                         onCaptureError = { exc ->
-                                            flashFlashActive = false
                                             Log.e("CameraActiveScreen", "Capture failed", exc)
                                         }
                                     )

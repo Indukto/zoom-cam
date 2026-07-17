@@ -1,12 +1,15 @@
 package com.example
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.media.MediaActionSound
 import android.media.ExifInterface
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -181,9 +184,12 @@ class CameraViewModel : ViewModel() {
 
         val baseInt = bestBase.toInt()
 
-        // Step 2: Get catalog data for FovMapper
+        // Step 2: Get catalog data for FovMapper.
+        // Prefer real per-lens focals from the catalog; fall back to sane defaults.
+        // The preview lens is ALWAYS the Primary (tele is never used for preview per spec §3),
+        // so the box scale is computed off the Primary's focal length regardless of capture lens.
         val catalog = lensCatalogResult
-        val primaryFocalMm = catalog?.primary?.equivFocalMm ?: bestBase
+        val primaryFocalMm = catalog?.primary?.equivFocalMm ?: 24f
         val ultraWideFocalMm = catalog?.ultraWide?.equivFocalMm ?: 13.4f
         val teleFocalMm = catalog?.tele?.equivFocalMm ?: 116.2f
 
@@ -352,27 +358,36 @@ class CameraViewModel : ViewModel() {
                     }
 
                     // 2. Crop the image to the exact Zoom Box bounds visible on screen
-                    val croppedBitmap = try {
-                        cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
-                    } catch (e: Exception) {
-                        Log.e("CameraViewModel", "Error cropping bitmap, fallback to full image", e)
+                    // Skip crop if the box covers nearly the entire frame (>= 99%)
+                    val finalBitmap = if (boxWidthFraction < 0.99f) {
+                        val cropped = try {
+                            cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
+                        } catch (e: Exception) {
+                            Log.e("CameraViewModel", "Error cropping bitmap, fallback to full image", e)
+                            bitmap
+                        }
+                        if (cropped != bitmap) {
+                            bitmap.recycle()
+                        }
+                        cropped
+                    } else {
                         bitmap
                     }
 
-                    if (croppedBitmap != bitmap) {
-                        bitmap.recycle()
+                    // 3. Apply the retro adjustments only if user has tweaked any slider
+                    val processedBitmap = if (_temperature.value != 0f || _exposure.value != 0f) {
+                        finalBitmap.applyRetroFilter(_temperature.value, _exposure.value)
+                    } else {
+                        finalBitmap
                     }
-
-                    // 3. Apply the retro adjustments (exposure, temperature, vignette) on the cropped result
-                    val processedBitmap = croppedBitmap.applyRetroFilter(_temperature.value, _exposure.value)
 
                     // Overwrite the original file with processed retro photo
                     FileOutputStream(rawFile).use { out ->
                         processedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
                     }
                     processedBitmap.recycle()
-                    if (croppedBitmap != processedBitmap) {
-                        croppedBitmap.recycle()
+                    if (finalBitmap != processedBitmap) {
+                        finalBitmap.recycle()
                     }
 
                     // 4. Rename file to embed focal length for later display
@@ -397,6 +412,9 @@ class CameraViewModel : ViewModel() {
                     } catch (e: Exception) {
                         Log.e("CameraViewModel", "Error writing EXIF data back", e)
                     }
+
+                    // 6. Save a copy to the public gallery
+                    savePhotoToGallery(context, renamedFile)
                 }
 
                 // Reload photo gallery
@@ -406,6 +424,46 @@ class CameraViewModel : ViewModel() {
             } finally {
                 _isCapturing.value = false
             }
+        }
+    }
+
+    private fun savePhotoToGallery(context: Context, file: File) {
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/ZoomBoxCamera")
+                } else {
+                    @Suppress("DEPRECATION")
+                    put(MediaStore.Images.Media.DATA, file.absolutePath)
+                }
+            }
+
+            val resolver = context.contentResolver
+            val contentUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+
+            val uri = resolver.insert(contentUri, values)
+            if (uri != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        file.inputStream().use { `in` ->
+                            `in`.copyTo(out)
+                        }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                }
+                Log.d("CameraViewModel", "Photo saved to gallery: ${file.name}")
+            }
+        } catch (e: Exception) {
+            Log.e("CameraViewModel", "Error saving photo to gallery", e)
         }
     }
     // Read EXIF display data from a saved photo file

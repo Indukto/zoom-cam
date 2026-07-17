@@ -1,0 +1,5 @@
+- [x] Update `LensProfile` data class to include `logicalCameraId`
+- [x] Update `LensCatalog` to populate `logicalCameraId` during enumeration
+- [x] Update `buildCameraSelectorForLens` in `CameraPreviewView.kt` to filter by logical ID
+- [x] Update `captureWithBestLens` in `CameraPreviewView.kt` to use `Camera2Interop` for physical lens targeting
+- [x] Verify build and functionality

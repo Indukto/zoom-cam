@@ -24,6 +24,11 @@ import java.util.concurrent.Executor
  * threshold, preWarmTele() opens a background session on the Tele lens so it's
  * ready at capture time, minimizing shutter latency.
  */
+data class BindResult(
+    val camera: Camera,
+    val imageCapture: ImageCapture
+)
+
 @OptIn(ExperimentalCamera2Interop::class)
 class PreviewSessionManager(
     private val context: Context,
@@ -54,17 +59,15 @@ class PreviewSessionManager(
      * @param cameraProvider The ProcessCameraProvider
      * @param physicalCameraId The target physical camera ID
      * @param surfaceProvider The Preview.SurfaceProvider from the PreviewView
-     * @param imageCapture The ImageCapture use case to bind
      * @param flashMode Flash mode: 0 = Auto, 1 = On, 2 = Off
-     * @return The bound Camera instance, or null on failure
+     * @return A BindResult containing the bound Camera and ImageCapture, or null on failure
      */
     fun bindPreview(
         cameraProvider: ProcessCameraProvider,
         physicalCameraId: String,
         surfaceProvider: Preview.SurfaceProvider,
-        imageCapture: ImageCapture,
         flashMode: Int = 0
-    ): Camera? {
+    ): BindResult? {
         return try {
             val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val rotation = windowManager.defaultDisplay.rotation
@@ -73,7 +76,7 @@ class PreviewSessionManager(
                 .build()
                 .apply { setSurfaceProvider(surfaceProvider) }
 
-            val updatedImageCapture = ImageCapture.Builder()
+            val newImageCapture = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .setTargetRotation(rotation)
                 .apply {
@@ -88,12 +91,13 @@ class PreviewSessionManager(
             val selector = buildSelectorForPhysicalCamera(physicalCameraId)
 
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
+            val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 selector,
                 preview,
-                updatedImageCapture
+                newImageCapture
             )
+            BindResult(camera, newImageCapture)
         } catch (e: Exception) {
             Log.e(TAG, "Error binding preview to $physicalCameraId", e)
             null
