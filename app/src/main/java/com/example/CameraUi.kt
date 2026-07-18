@@ -66,8 +66,20 @@ import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.WbSunny
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -287,23 +299,137 @@ private fun SpectrumSlider(
     }
 }
 
+@Composable
+private fun PresetButton(
+    onClick: () -> Unit,
+    isSelected: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(if (isSelected) Color(0xFF2C2C2E) else Color.Transparent)
+            .border(1.dp, if (isSelected) Color.White else Color.White.copy(alpha = 0.25f), CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center,
+        content = content
+    )
+}
+
+@Composable
+private fun ColorPlot(
+    temperature: Float,
+    tint: Float,
+    onValueChange: (Float, Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var size by remember { mutableStateOf(IntSize.Zero) }
+
+    val xFraction = ((temperature + 2f) / 4f).coerceIn(0f, 1f)
+    val yFraction = (1f - (tint + 2f) / 4f).coerceIn(0f, 1f)
+
+    Box(
+        modifier = modifier
+            .onSizeChanged { size = it }
+            .pointerInput(Unit) {
+                detectDragGestures { change, _ ->
+                    change.consume()
+                    if (size.width > 0 && size.height > 0) {
+                        val currentX = change.position.x.coerceIn(0f, size.width.toFloat())
+                        val currentY = change.position.y.coerceIn(0f, size.height.toFloat())
+                        val newTemp = (currentX / size.width.toFloat()) * 4f - 2f
+                        val newTint = (1f - currentY / size.height.toFloat()) * 4f - 2f
+                        onValueChange(newTemp, newTint)
+                    }
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    if (size.width > 0 && size.height > 0) {
+                        val currentX = offset.x.coerceIn(0f, size.width.toFloat())
+                        val currentY = offset.y.coerceIn(0f, size.height.toFloat())
+                        val newTemp = (currentX / size.width.toFloat()) * 4f - 2f
+                        val newTint = (1f - currentY / size.height.toFloat()) * 4f - 2f
+                        onValueChange(newTemp, newTint)
+                    }
+                }
+            }
+            .clip(RoundedCornerShape(12.dp))
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val horizontalBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF87CEEB), // cool cyan/blue
+                    Color(0xFFF8FAFC), // neutral white
+                    Color(0xFFFBBF24)  // warm amber/orange
+                ),
+                start = Offset(0f, 0f),
+                end = Offset(size.width.toFloat(), 0f)
+            )
+
+            val verticalBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFEC4899), // magenta/pink
+                    Color.Transparent,
+                    Color(0xFF22C55E)  // green
+                ),
+                start = Offset(0f, 0f),
+                end = Offset(0f, size.height.toFloat())
+            )
+
+            drawRect(brush = horizontalBrush)
+            drawRect(brush = verticalBrush, alpha = 0.65f)
+
+            val xPos = xFraction * size.width
+            val yPos = yFraction * size.height
+
+            val pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f), 0f)
+            // Horizontal dashed line
+            drawLine(
+                color = Color.Black.copy(alpha = 0.45f),
+                start = Offset(0f, yPos),
+                end = Offset(size.width.toFloat(), yPos),
+                strokeWidth = 1f,
+                pathEffect = pathEffect
+            )
+            // Vertical dashed line
+            drawLine(
+                color = Color.Black.copy(alpha = 0.45f),
+                start = Offset(xPos, 0f),
+                end = Offset(xPos, size.height.toFloat()),
+                strokeWidth = 1f,
+                pathEffect = pathEffect
+            )
+
+            // Draw selection thumb (black circle with white border)
+            drawCircle(
+                color = Color.White,
+                radius = 8.dp.toPx(),
+                center = Offset(xPos, yPos)
+            )
+            drawCircle(
+                color = Color.Black,
+                radius = 6.dp.toPx(),
+                center = Offset(xPos, yPos)
+            )
+        }
+    }
+}
+
 /**
- * White balance (color temperature) panel. Shows a live Kelvin readout and a
- * color-temperature spectrum strip.
+ * White balance (color temperature & tint) panel. Shows a live Kelvin/tint readout and a
+ * 2D color-plot space with preset buttons.
  */
 @Composable
 private fun WhiteBalancePanel(
     temperature: Float,
-    onValueChange: (Float) -> Unit
+    tint: Float,
+    onValueChange: (Float, Float) -> Unit
 ) {
     val kValue = tempToKelvin(temperature)
-    val descriptor = when {
-        temperature > 1f -> "Warm"
-        temperature > 0f -> "Slight Warm"
-        temperature < -1f -> "Cool"
-        temperature < 0f -> "Slight Cool"
-        else -> "Daylight"
-    }
+    val tintInt = (tint * 10).toInt()
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -312,46 +438,87 @@ private fun WhiteBalancePanel(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "WHITE BALANCE",
+                text = "COLOR BALANCE",
                 color = Color.White.copy(alpha = 0.85f),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Left: Color Plot with text label centered above it
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.weight(1f)
+            ) {
                 Text(
-                    text = "$kValue K · $descriptor",
+                    text = "${kValue}K ${if (tintInt >= 0) " $tintInt" else "$tintInt"}",
                     color = Color.White,
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Serif
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                ColorPlot(
+                    temperature = temperature,
+                    tint = tint,
+                    onValueChange = onValueChange,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
                 )
             }
+
+            // Right: Row of preset buttons
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Auto preset (A)
+                PresetButton(
+                    onClick = { onValueChange(0f, 0f) },
+                    isSelected = temperature == 0f && tint == 0f
+                ) {
+                    Text(
+                        text = "A",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Daylight preset (Sun)
+                PresetButton(
+                    onClick = { onValueChange(0.5f, 0.2f) },
+                    isSelected = temperature == 0.5f && tint == 0.2f
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.WbSunny,
+                        contentDescription = "Daylight",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                // Tungsten preset (Bulb)
+                PresetButton(
+                    onClick = { onValueChange(-1.5f, -0.5f) },
+                    isSelected = temperature == -1.5f && tint == -0.5f
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Lightbulb,
+                        contentDescription = "Incandescent",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
         }
-        Spacer(modifier = Modifier.height(10.dp))
-        SpectrumSlider(
-            value = temperature,
-            onValueChange = onValueChange,
-            valueRange = -2f..2f,
-            gradient = listOf(
-                Color(0xFF1D4ED8),  // deep blue (cool / high K)
-                Color(0xFF7DD3FC),  // light cyan
-                Color(0xFFF8FAFC),  // neutral white
-                Color(0xFFFDE68A),  // warm white
-                Color(0xFFF59E0B),  // amber
-                Color(0xFF9F1F4B)   // deep magenta-red (warm / low K)
-            ),
-            valueLabel = "${kValue}K",
-            leftTick = "9000K",
-            centerTick = "5600K",
-            rightTick = "2300K"
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "double-tap to reset",
-            color = Color.White.copy(alpha = 0.35f),
-            fontSize = 8.sp
-        )
     }
 }
 
@@ -734,6 +901,7 @@ fun CameraActiveScreen(
     val digitalZoomRatio by viewModel.digitalZoomRatio.collectAsState()
     val exposure by viewModel.exposure.collectAsState()
     val temperature by viewModel.temperature.collectAsState()
+    val tint by viewModel.tint.collectAsState()
     val flashMode by viewModel.flashMode.collectAsState()
     val isFrontCamera by viewModel.isFrontCamera.collectAsState()
     val capturedPhotos by viewModel.capturedPhotos.collectAsState()
@@ -831,8 +999,7 @@ fun CameraActiveScreen(
         )
         }
 
-        // Color overlay for retro tint — scoped to the viewfinder so it never
-        // washes over the controls / bottom deck.
+        // Color overlay for retro temperature tint
         if (temperature != 0f) {
             Box(
                 modifier = Modifier
@@ -845,6 +1012,140 @@ fun CameraActiveScreen(
                         }
                     )
             )
+        }
+
+        // Color overlay for retro tint (green/magenta)
+        if (tint != 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        if (tint > 0f) {
+                            Color(0xFFEC4899).copy(alpha = (tint * 0.08f).coerceIn(0f, 0.22f))
+                        } else {
+                            Color(0xFF22C55E).copy(alpha = (-tint * 0.08f).coerceIn(0f, 0.22f))
+                        }
+                    )
+            )
+        }
+
+        // Three-point settings menu button in the top-right corner of the viewfinder
+        var showSettingsMenu by remember { mutableStateOf(false) }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(12.dp)
+        ) {
+            IconButton(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    showSettingsMenu = true
+                },
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.MoreVert,
+                    contentDescription = "Settings",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            DropdownMenu(
+                expanded = showSettingsMenu,
+                onDismissRequest = { showSettingsMenu = false },
+                modifier = Modifier
+                    .background(Color(0xFF1E1E1E))
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+            ) {
+                val rawEnabled = rawAvailableForCurrentLens && !isFrontCamera
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Text(
+                                text = "RAW Format",
+                                color = if (rawEnabled) Color.White else Color.White.copy(alpha = 0.3f),
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.width(24.dp))
+                            Switch(
+                                checked = rawModeEnabled,
+                                onCheckedChange = {
+                                    viewModel.toggleRawMode()
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                enabled = rawEnabled,
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color(0xFFFBBF24),
+                                    checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
+                                    uncheckedThumbColor = Color.Gray,
+                                    uncheckedTrackColor = Color.DarkGray
+                                )
+                            )
+                        }
+                    },
+                    onClick = {
+                        if (rawEnabled) {
+                            viewModel.toggleRawMode()
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                    }
+                )
+
+                val nightEnabled = (CaptureExtension.NIGHT in availableExtensions || !extensionsProbeDone) && !isFrontCamera
+                val isNightModeActive = activeExtension == CaptureExtension.NIGHT
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Text(
+                                text = "Night Mode",
+                                color = if (nightEnabled) Color.White else Color.White.copy(alpha = 0.3f),
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.width(24.dp))
+                            Switch(
+                                checked = isNightModeActive,
+                                onCheckedChange = {
+                                    if (isNightModeActive) {
+                                        viewModel.setExtension(CaptureExtension.NONE)
+                                    } else {
+                                        viewModel.setExtension(CaptureExtension.NIGHT)
+                                    }
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                enabled = nightEnabled,
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color(0xFFFBBF24),
+                                    checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
+                                    uncheckedThumbColor = Color.Gray,
+                                    uncheckedTrackColor = Color.DarkGray
+                                )
+                            )
+                        }
+                    },
+                    onClick = {
+                        if (nightEnabled) {
+                            if (isNightModeActive) {
+                                viewModel.setExtension(CaptureExtension.NONE)
+                            } else {
+                                viewModel.setExtension(CaptureExtension.NIGHT)
+                            }
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                    }
+                )
+            }
         }
         }
 
@@ -929,8 +1230,10 @@ fun CameraActiveScreen(
                         if (showTempSlider) {
                             WhiteBalancePanel(
                                 temperature = temperature,
-                                onValueChange = {
-                                    viewModel.setTemperature(it)
+                                tint = tint,
+                                onValueChange = { tempVal, tintVal ->
+                                    viewModel.setTemperature(tempVal)
+                                    viewModel.setTint(tintVal)
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
                             )
@@ -1005,83 +1308,7 @@ fun CameraActiveScreen(
                     }
                 }
 
-                // RAW + Extension mode strip
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 10.dp, bottom = 2.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // RAW toggle
-                    val rawEnabled = rawAvailableForCurrentLens && !isFrontCamera
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(
-                                when {
-                                    rawModeEnabled -> Color(0xFFF59E0B)
-                                    rawEnabled -> Color(0xFF2C2C2E)
-                                    else -> Color(0xFF1C1C1E)
-                                }
-                            )
-                            .then(
-                                if (rawEnabled) Modifier.clickable {
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    viewModel.toggleRawMode()
-                                } else Modifier
-                            )
-                            .padding(horizontal = 12.dp, vertical = 6.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "RAW",
-                            color = if (rawModeEnabled) Color.Black else
-                                if (rawEnabled) Color.White.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.25f),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.5.sp,
-                            fontFamily = FontFamily.Serif
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // Extension mode cycle button
-                    if (!isFrontCamera && extensionsProbeDone && availableExtensions.size > 1) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(
-                                    if (activeExtension != CaptureExtension.NONE) Color(0xFF2C2C2E)
-                                    else Color(0xFF1C1C1E)
-                                )
-                                .clickable {
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    viewModel.cycleExtension()
-                                }
-                                .padding(horizontal = 12.dp, vertical = 6.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = when (activeExtension) {
-                                    CaptureExtension.NONE -> "STD"
-                                    CaptureExtension.HDR -> "HDR"
-                                    CaptureExtension.NIGHT -> "NIGHT"
-                                    CaptureExtension.BOKEH -> "BOKEH"
-                                    CaptureExtension.FACE_RETOUCH -> "RETOUCH"
-                                    CaptureExtension.AUTO -> "AUTO"
-                                },
-                                color = if (activeExtension != CaptureExtension.NONE) Color(0xFFF59E0B)
-                                else Color.White.copy(alpha = 0.5f),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.5.sp,
-                                fontFamily = FontFamily.Serif
-                            )
-                        }
-                    }
-                }
+                // RAW and Night Mode have been moved to the three-dot menu in the viewfinder.
             }
         }
 

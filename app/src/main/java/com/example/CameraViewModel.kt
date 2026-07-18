@@ -67,6 +67,9 @@ class CameraViewModel : ViewModel() {
     private val _temperature = MutableStateFlow(0f)
     val temperature: StateFlow<Float> = _temperature.asStateFlow()
 
+    private val _tint = MutableStateFlow(0f)
+    val tint: StateFlow<Float> = _tint.asStateFlow()
+
     private val _flashMode = MutableStateFlow(0)
     val flashMode: StateFlow<Int> = _flashMode.asStateFlow()
 
@@ -220,6 +223,7 @@ class CameraViewModel : ViewModel() {
 
     fun setExposure(value: Float) { _exposure.value = value.coerceIn(-3.0f, 3.0f) }
     fun setTemperature(value: Float) { _temperature.value = value.coerceIn(-2.0f, 2.0f) }
+    fun setTint(value: Float) { _tint.value = value.coerceIn(-2.0f, 2.0f) }
     fun toggleFlash() { _flashMode.value = (_flashMode.value + 1) % 3 }
     fun toggleCamera() { _isFrontCamera.value = !_isFrontCamera.value }
     fun toggleGridLines() { _showGridLines.value = !_showGridLines.value }
@@ -472,8 +476,8 @@ class CameraViewModel : ViewModel() {
                         } catch (e: Exception) { Log.e("CameraViewModel", "Error cropping", e); bitmap }
                     } else { bitmap }
 
-                    val processedBitmap = if (_temperature.value != 0f || _exposure.value != 0f) {
-                        finalBitmap.applyRetroFilter(_temperature.value, _exposure.value)
+                    val processedBitmap = if (_temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f) {
+                        finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value)
                     } else { finalBitmap }
 
                     FileOutputStream(rawFile).use { out -> processedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out) }
@@ -572,7 +576,7 @@ class CameraViewModel : ViewModel() {
         }
     }
 
-    private fun Bitmap.applyRetroFilter(tempVal: Float, expVal: Float): Bitmap {
+    private fun Bitmap.applyRetroFilter(tempVal: Float, tintVal: Float, expVal: Float): Bitmap {
         val w = this.width; val h = this.height
         val output = Bitmap.createBitmap(w, h, this.config ?: Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(output)
@@ -586,6 +590,12 @@ class CameraViewModel : ViewModel() {
         if (tempVal != 0f) {
             val tintColor = if (tempVal > 0f) android.graphics.Color.argb((tempVal * 25f).toInt().coerceIn(0, 80), 245, 158, 11)
             else android.graphics.Color.argb((-tempVal * 25f).toInt().coerceIn(0, 80), 14, 165, 233)
+            val tp = android.graphics.Paint().apply { colorFilter = android.graphics.PorterDuffColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_ATOP) }
+            canvas.drawBitmap(output, 0f, 0f, tp)
+        }
+        if (tintVal != 0f) {
+            val tintColor = if (tintVal > 0f) android.graphics.Color.argb((tintVal * 25f).toInt().coerceIn(0, 80), 236, 72, 153)
+            else android.graphics.Color.argb((-tintVal * 25f).toInt().coerceIn(0, 80), 34, 197, 94)
             val tp = android.graphics.Paint().apply { colorFilter = android.graphics.PorterDuffColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_ATOP) }
             canvas.drawBitmap(output, 0f, 0f, tp)
         }
