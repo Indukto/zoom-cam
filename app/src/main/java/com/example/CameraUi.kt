@@ -29,6 +29,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -102,6 +104,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -360,29 +363,69 @@ private fun ColorPlot(
     val xFraction = ((temperature + 2f) / 4f).coerceIn(0f, 1f)
     val yFraction = (1f - (tint + 2f) / 4f).coerceIn(0f, 1f)
 
+    // pointerInput(Unit) launches its coroutine once and outlives a single
+    // composition. Reading xFraction / yFraction directly inside the
+    // awaitEachGesture block would freeze them at the values from the first
+    // launch and reset the cursor to (0, 0) on every re-press. rememberUpdatedState
+    // exposes the latest parameter values to the long-running coroutine without
+    // restarting it on each state change (which would kill ongoing gestures).
+    val currentXFraction by rememberUpdatedState(xFraction)
+    val currentYFraction by rememberUpdatedState(yFraction)
+    val currentOnValueChange by rememberUpdatedState(onValueChange)
+
+    // Snap-to-grid step for both axes. Picked so the 9x9 stop grid lines up
+    // with the presets below (Auto = 0/0, Daylight = 0.5/0, Tungsten = -1.5/-0.5)
+    // and gives 81 discrete positions inside the -2..+2 design space.
+    val colorStep = 0.5f
+    fun snap(value: Float): Float =
+        (kotlin.math.round(value / colorStep) * colorStep).coerceIn(-2f, 2f)
+
+    // Map a box-pixel coordinate to (temperature, tint). Each gesture
+    // anchors the cursor at its current box position with a finger-based
+    // offset, so consecutive touches don't teleport the selector.
+    fun emitAtPosition(position: Offset) {
+        if (size.width > 0 && size.height > 0) {
+            val currentX = position.x.coerceIn(0f, size.width.toFloat())
+            val currentY = position.y.coerceIn(0f, size.height.toFloat())
+            val newTemp = snap((currentX / size.width.toFloat()) * 4f - 2f)
+            val newTint = snap((1f - currentY / size.height.toFloat()) * 4f - 2f)
+            currentOnValueChange(newTemp, newTint)
+        }
+    }
+
     Box(
         modifier = modifier
             .onSizeChanged { size = it }
             .pointerInput(Unit) {
-                detectDragGestures { change, _ ->
-                    change.consume()
-                    if (size.width > 0 && size.height > 0) {
-                        val currentX = change.position.x.coerceIn(0f, size.width.toFloat())
-                        val currentY = change.position.y.coerceIn(0f, size.height.toFloat())
-                        val newTemp = (currentX / size.width.toFloat()) * 4f - 2f
-                        val newTint = (1f - currentY / size.height.toFloat()) * 4f - 2f
-                        onValueChange(newTemp, newTint)
-                    }
-                }
-            }
-            .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    if (size.width > 0 && size.height > 0) {
-                        val currentX = offset.x.coerceIn(0f, size.width.toFloat())
-                        val currentY = offset.y.coerceIn(0f, size.height.toFloat())
-                        val newTemp = (currentX / size.width.toFloat()) * 4f - 2f
-                        val newTint = (1f - currentY / size.height.toFloat()) * 4f - 2f
-                        onValueChange(newTemp, newTint)
+                // Unified press-then-drag handler:
+                //   1. Touch-down snaps the cursor instantly to the clicked
+                //      cell (no touch-slop wait -- fires on awaitFirstDown).
+                //   2. Each subsequent pointer event tracks the finger
+                //      across cells, emitting a snapped position per step.
+                //   3. On release the cursor stays where the finger lifted.
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // Unconditional consume: prevent sibling gesture detectors
+                    // from receiving events even before size has been laid out.
+                    down.consume()
+                    // Capture the cursor's current box position plus the
+                    // offset from where the finger pressed. The selector
+                    // never resets between gestures -- only finger movement
+                    // walks the cursor, by an amount equal to the finger's
+                    // path. Repeat touches just re-anchor the offset.
+                    val cursorStartX = currentXFraction * size.width.toFloat()
+                    val cursorStartY = currentYFraction * size.height.toFloat()
+                    val pressOffsetX = down.position.x - cursorStartX
+                    val pressOffsetY = down.position.y - cursorStartY
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        emitAtPosition(Offset(
+                            change.position.x - pressOffsetX,
+                            change.position.y - pressOffsetY
+                        ))
+                        change.consume()
                     }
                 }
             }
@@ -411,6 +454,31 @@ private fun ColorPlot(
 
             drawRect(brush = horizontalBrush)
             drawRect(brush = verticalBrush, alpha = 0.65f)
+
+            // Snap grid: 8 faint internal lines per axis so the 0.5-step
+            // cadence is visually discoverable. Drawn before the crosshair
+            // and thumb so the cursor sits on top.
+            val cellColor = Color.White.copy(alpha = 0.10f)
+            val cellStroke = 0.5f
+            val cells = 15 // 9 stops -> 8 internal lines
+            for (i in 1 until cells) {
+                val x = size.width.toFloat() * i / cells
+                drawLine(
+                    color = cellColor,
+                    start = Offset(x, 0f),
+                    end = Offset(x, size.height.toFloat()),
+                    strokeWidth = cellStroke
+                )
+            }
+            for (i in 1 until cells) {
+                val y = size.height.toFloat() * i / cells
+                drawLine(
+                    color = cellColor,
+                    start = Offset(0f, y),
+                    end = Offset(size.width.toFloat(), y),
+                    strokeWidth = cellStroke
+                )
+            }
 
             val xPos = xFraction * size.width
             val yPos = yFraction * size.height
@@ -524,8 +592,8 @@ private fun WhiteBalancePanel(
 
                 // Daylight preset (Sun)
                 PresetButton(
-                    onClick = { onValueChange(0.5f, 0.2f) },
-                    isSelected = temperature == 0.5f && tint == 0.2f
+                    onClick = { onValueChange(0.5f, 0.5f) },
+                    isSelected = temperature == 0.5f && tint == 0.5f
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.WbSunny,
