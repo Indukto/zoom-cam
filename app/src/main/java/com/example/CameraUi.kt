@@ -111,7 +111,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -1087,32 +1086,18 @@ fun CameraActiveScreen(
         val totalWidth = maxWidth
         val totalHeight = maxHeight
 
-        // Orientation detection. BoxWithConstraints is preferred over
-        // LocalConfiguration.orientation because it also reacts to
-        // multi-window / foldable hinge changes. Portrait keeps the existing
-        // 92%-wide top-anchored layout; landscape pins the viewfinder to the
-        // left half and relocates the floating bubble + bottom deck below.
-        val isLandscape = maxWidth > maxHeight
-
-        // Viewfinder bounds.
-        //   portrait:  vfWidth = 0.92 × totalWidth; vfHeight = vfWidth × heightToWidth;
-        //              vfTop = 56.dp; vfX horizontally centred.
-        //   landscape: vfWidth = min(0.48 × totalWidth, (totalHeight - 16.dp) /
-        //              heightToWidth) — keeps viewfinder tall enough for any
-        //              selected aspect ratio without spilling past the screen;
-        //              vfHeight derived the same way; vfTop vertical-centred;
-        //              vfX pinned to 16.dp so the right half stays free for
-        //              the relocated deck.
-        val vfWidth = if (isLandscape) {
-            val limitedByWidth = totalWidth * 0.48f
-            val limitedByHeight = (totalHeight - 16.dp) / aspectRatio.heightToWidth
-            if (limitedByWidth < limitedByHeight) limitedByWidth else limitedByHeight
-        } else {
-            totalWidth * 0.92f
-        }
+        // Viewfinder bounds — width fixed at 92% of screen, height adapts to
+        // the selected aspect ratio. With 4:3 (height/width = 1.35) the box is
+        // 1.23× its width, with 3:2 (1.5) it's 1.38×, and with 1:1 it's exactly
+        // the width. The zoom-box clamp + the Canvas overlay both keep working
+        // unchanged because they already size themselves from vfWidth / aspectRatio.
+        // The same bounds apply in every device orientation: portrait or
+        // landscape, the viewfinder stays at this fixed size + top-anchored,
+        // so nothing on the UI jumps around when the user rotates the phone.
+        val vfWidth = totalWidth * 0.92f
         val vfHeight = vfWidth * aspectRatio.heightToWidth
-        val vfTop = if (isLandscape) (totalHeight - vfHeight) / 2f else 56.dp
-        val vfX = if (isLandscape) 16.dp else (totalWidth - vfWidth) / 2f
+        val vfTop = 56.dp
+        val vfX = (totalWidth - vfWidth) / 2f
 
         // 1. Black background
         Box(modifier = Modifier.fillMaxSize().background(Color.Black))
@@ -1310,27 +1295,13 @@ fun CameraActiveScreen(
             }
         }
 
-        // Floating Control Capsule + Slider popup.
-        //   portrait:  centred horizontally, offset to vfTop + vfHeight - 60.dp.
-        //   landscape: align(Alignment.BottomEnd) of the right-half deck so it
-        //              sits above the relocated bottom deck; the slider popup
-        //              rides along because it's the first child of the parent
-        //              Column.
-        //   zIndex(1f) in landscape keeps the bubble's pill chrome painted ON
-        //   TOP of the translucent bottom deck (which is declared later in this
-        //   BoxWithConstraints body) — without it, the deck renders over the
-        //   bubble and tints the controls toward black.
+        // Floating Control Capsule + Slider popup centered inside the bottom of the viewfinder.
+        // The bubble stays at the same vf-relative offset in every orientation
+        // so nothing on the UI moves when the device rotates.
         Box(
-            modifier = if (isLandscape) {
-                Modifier
-                    .zIndex(1f)
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 16.dp)
-            } else {
-                Modifier
-                    .offset(y = vfTop + vfHeight - 60.dp)
-                    .fillMaxWidth()
-            },
+            modifier = Modifier
+                .offset(y = vfTop + vfHeight - 60.dp)
+                .fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1441,22 +1412,13 @@ fun CameraActiveScreen(
         }
 
         Column(
-            modifier = if (isLandscape) {
-                Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxWidth(0.5f)
-                    .fillMaxHeight(0.7f)
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .padding(vertical = 16.dp)
-            } else {
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Color.Black)
-                    .padding(bottom = 40.dp, top = 0.dp)
-            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color.Black)
+                .padding(bottom = 40.dp, top = 0.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = if (isLandscape) Arrangement.spacedBy(20.dp) else Arrangement.spacedBy(0.dp)
+            verticalArrangement = Arrangement.spacedBy(0.dp)
         ) {
             // ── Row 1: Auxiliary Controls ──────────────────────────────────────
             Row(
@@ -1558,14 +1520,10 @@ fun CameraActiveScreen(
             }
 
             // ── Row 2: Primary Actions ─────────────────────────────────────────
-            // Horizontal padding shrinks to 12.dp in landscape so the three
-            // control buttons (gallery 56 + shutter 84 + preset 56 ≈ 196 dp
-            // total) fit inside the smaller right-half column without the
-            // contentAlignment.shift flag pulling the shutter off-centre.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = if (isLandscape) 12.dp else 24.dp),
+                    .padding(horizontal = 24.dp),
                 contentAlignment = Alignment.Center
             ) {
                 // Left: last-captured thumbnail card
