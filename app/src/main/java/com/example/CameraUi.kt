@@ -71,7 +71,6 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.GridOff
-import androidx.compose.material.icons.rounded.FilterNone
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.AlertDialog
@@ -117,6 +116,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -145,6 +145,28 @@ import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
 
 private const val FLASH_BURST_DURATION_MS = 120L
+
+/**
+ * Draws a rule-of-thirds grid (4 lines at width/height thirds) inside [rect].
+ * Shared between the inner zoom-box grid and the full-viewfinder grid so
+ * their styling stays in lock-step.
+ */
+private fun DrawScope.drawThirdsGrid(
+    rect: Rect,
+    color: Color,
+    strokeWidth: Float
+) {
+    val w = rect.width
+    val h = rect.height
+    val thirdW1 = rect.left + w / 3f
+    val thirdW2 = rect.left + 2f * w / 3f
+    val thirdH1 = rect.top + h / 3f
+    val thirdH2 = rect.top + 2f * h / 3f
+    drawLine(color = color, start = Offset(thirdW1, rect.top), end = Offset(thirdW1, rect.bottom), strokeWidth = strokeWidth)
+    drawLine(color = color, start = Offset(thirdW2, rect.top), end = Offset(thirdW2, rect.bottom), strokeWidth = strokeWidth)
+    drawLine(color = color, start = Offset(rect.left, thirdH1), end = Offset(rect.right, thirdH1), strokeWidth = strokeWidth)
+    drawLine(color = color, start = Offset(rect.left, thirdH2), end = Offset(rect.right, thirdH2), strokeWidth = strokeWidth)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Color-temperature & exposure controls
@@ -920,6 +942,13 @@ fun CameraActiveScreen(
     val lensSwitchTrigger by viewModel.lensSwitchTrigger.collectAsState()
     val showGridLines by viewModel.showGridLines.collectAsState()
 
+    // Cross-fade the grid in/out so flipping the aux toggle never reads as a hard snap.
+    val gridAlpha by animateFloatAsState(
+        targetValue = if (showGridLines) 1f else 0f,
+        animationSpec = tween(durationMillis = 220),
+        label = "grid_alpha"
+    )
+
     val showTempSlider by viewModel.showTemperatureSlider.collectAsState()
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
@@ -1067,6 +1096,23 @@ fun CameraActiveScreen(
 
         val showZoomBox = selectedLensRole == LensRole.PRIMARY && animatedBoxWidthFraction < 0.99f
 
+        // Coarse 3x3 grid over the full viewfinder when no zoom box is active
+        // (e.g. ultra-wide / tele lens). Pairs with the inner thirds grid drawn
+        // inside `if (showZoomBox)` below.
+        if (gridAlpha > 0f && !showZoomBox) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val left = vfX.toPx()
+                val top = vfTop.toPx()
+                val right = left + vfWidth.toPx()
+                val bottom = top + vfHeight.toPx()
+                drawThirdsGrid(
+                    rect = Rect(left, top, right, bottom),
+                    color = Color.White.copy(alpha = 0.40f * gridAlpha),
+                    strokeWidth = 1.dp.toPx()
+                )
+            }
+        }
+
         if (showZoomBox) {
             val zoomBoxTop = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
             Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1081,6 +1127,17 @@ fun CameraActiveScreen(
                 }
                 clipPath(path = path, clipOp = ClipOp.Difference) {
                     drawRect(color = Color.Black.copy(alpha = 0.65f))
+                }
+
+                if (gridAlpha > 0f) {
+                    // Rule-of-thirds grid lines, clipped to the zoom box rounded rect
+                    clipPath(path = path, clipOp = ClipOp.Intersect) {
+                        drawThirdsGrid(
+                            rect = rect,
+                            color = Color.White.copy(alpha = 0.55f * gridAlpha),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
                 }
             }
 
@@ -1122,9 +1179,7 @@ fun CameraActiveScreen(
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     showSettingsMenu = true
                 },
-                modifier = Modifier
-                    .size(36.dp)
-                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+                modifier = Modifier.size(36.dp)
             ) {
                 Icon(
                     imageVector = Icons.Rounded.MoreVert,
@@ -1229,9 +1284,6 @@ fun CameraActiveScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleGridLines() }, modifier = Modifier.size(32.dp)) {
-                        Icon(imageVector = if (showGridLines) Icons.Rounded.GridOn else Icons.Rounded.GridOff, contentDescription = "Grid", tint = if (showGridLines) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
-                    }
                     IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() }, modifier = Modifier.size(32.dp)) {
                         Icon(imageVector = Icons.Rounded.Thermostat, contentDescription = "Temperature", tint = if (temperature != 0f || tint != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
                     }
@@ -1258,7 +1310,6 @@ fun CameraActiveScreen(
         // 6. Bottom Deck Controls (two-row Dazz-cam style)
         val activePreset by viewModel.activePreset.collectAsState()
         val selfTimerMode by viewModel.selfTimerMode.collectAsState()
-        val doubleExposureActive by viewModel.doubleExposureActive.collectAsState()
         var showPresetPicker by remember { mutableStateOf(false) }
 
         // Lambda that executes the actual capture, extracted so timer can call it
@@ -1324,38 +1375,21 @@ fun CameraActiveScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Gallery / Import button
+                // Grid overlay toggle
                 IconButton(
                     onClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        if (capturedPhotos.isNotEmpty()) viewModel.setSelectedPhoto(capturedPhotos.first())
-                    },
-                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
-                    modifier = Modifier.size(40.dp).testTag("gallery_import_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.PhotoLibrary,
-                        contentDescription = "Gallery",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                // Double Exposure toggle
-                IconButton(
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        viewModel.toggleDoubleExposure()
+                        viewModel.toggleGridLines()
                     },
                     colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (doubleExposureActive) Color(0xFF6366F1) else Color(0xFF1C1C1E)
+                        containerColor = if (showGridLines) Color(0xFFFBBF24).copy(alpha = 0.18f) else Color(0xFF1C1C1E)
                     ),
-                    modifier = Modifier.size(40.dp).testTag("double_exposure_button")
+                    modifier = Modifier.size(40.dp).testTag("grid_overlay_button")
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.FilterNone,
-                        contentDescription = "Double Exposure",
-                        tint = if (doubleExposureActive) Color.White else Color.Gray,
+                        imageVector = if (showGridLines) Icons.Rounded.GridOn else Icons.Rounded.GridOff,
+                        contentDescription = "Grid",
+                        tint = if (showGridLines) Color(0xFFFBBF24) else Color.White,
                         modifier = Modifier.size(18.dp)
                     )
                 }
