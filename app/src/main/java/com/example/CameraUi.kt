@@ -13,6 +13,11 @@ import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -442,69 +447,275 @@ fun CameraUi(
 fun CameraPermissionOnboarding(
     onRequestPermission: () -> Unit
 ) {
-    Column(
+    // ── Staggered entrance animation ──────────────────────────────────────
+    val infiniteTransition = rememberInfiniteTransition(label = "splash_pulse")
+    val iconPulse by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.06f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1800, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "icon_pulse"
+    )
+    val buttonPulse by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.03f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2200, delayMillis = 400, easing = EaseInOutCubic),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "button_pulse"
+    )
+
+    // Track whether each element has entered for staggered reveal
+    var revealIcon by remember { mutableStateOf(false) }
+    var revealTitle by remember { mutableStateOf(false) }
+    var revealTagline by remember { mutableStateOf(false) }
+    var revealDesc by remember { mutableStateOf(false) }
+    var revealButton by remember { mutableStateOf(false) }
+    var revealFooter by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        revealIcon = true
+        kotlinx.coroutines.delay(180)
+        revealTitle = true
+        kotlinx.coroutines.delay(160)
+        revealTagline = true
+        kotlinx.coroutines.delay(160)
+        revealDesc = true
+        kotlinx.coroutines.delay(200)
+        revealButton = true
+        kotlinx.coroutines.delay(200)
+        revealFooter = true
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
+            .background(Color(0xFF121212))
     ) {
-        Box(
-            modifier = Modifier
-                .size(100.dp)
-                .background(Color(0xFF232323), CircleShape)
-                .border(2.dp, Color(0xFFF59E0B), CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.CameraAlt,
-                contentDescription = "Retro Camera Icon",
-                tint = Color(0xFFF59E0B),
-                modifier = Modifier.size(48.dp)
+        // ── Subtle radial gradient overlay ────────────────────────────────
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color(0xFFF59E0B).copy(alpha = 0.06f),
+                        Color.Transparent
+                    ),
+                    center = Offset(size.width / 2f, size.height * 0.42f),
+                    radius = size.maxDimension * 0.7f
+                )
             )
         }
 
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Text(
-            text = "ZOOM CAMERA",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White,
-            letterSpacing = 2.sp,
-            fontFamily = FontFamily.Serif
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        Text(
-            text = "To start capturing vintage film styled photos with our signature zoom box and warm retro filters, please grant access to the camera.",
-            fontSize = 15.sp,
-            color = Color(0xFF9CA3AF),
-            textAlign = TextAlign.Center,
-            lineHeight = 22.sp,
-            modifier = Modifier.padding(horizontal = 16.dp)
-        )
-
-        Spacer(modifier = Modifier.height(40.dp))
-
-        Button(
-            onClick = onRequestPermission,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFFF59E0B),
-                contentColor = Color.Black
-            ),
-            shape = RoundedCornerShape(30.dp),
+        // ── Decorative film-frame borders ─────────────────────────────────
+        // Top frame line
+        Box(
             modifier = Modifier
-                .fillMaxWidth(0.7f)
-                .height(54.dp)
-                .testTag("enable_camera_button")
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color(0xFFF59E0B).copy(alpha = 0.3f),
+                            Color(0xFFF59E0B).copy(alpha = 0.5f),
+                            Color(0xFFF59E0B).copy(alpha = 0.3f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+        // Sprocket holes (top)
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 10.dp)
+                .fillMaxWidth(0.85f),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            repeat(12) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp, 4.dp)
+                        .background(Color(0xFFF59E0B).copy(alpha = 0.15f), RoundedCornerShape(1.dp))
+                )
+            }
+        }
+
+        // Bottom frame line
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(3.dp)
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            Color.Transparent,
+                            Color(0xFFF59E0B).copy(alpha = 0.3f),
+                            Color(0xFFF59E0B).copy(alpha = 0.5f),
+                            Color(0xFFF59E0B).copy(alpha = 0.3f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+        // Sprocket holes (bottom)
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 10.dp)
+                .fillMaxWidth(0.85f),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            repeat(12) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp, 4.dp)
+                        .background(Color(0xFFF59E0B).copy(alpha = 0.15f), RoundedCornerShape(1.dp))
+                )
+            }
+        }
+
+        // ── Main content column ───────────────────────────────────────────
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // ── Icon ──────────────────────────────────────────────────────
+            AnimatedVisibility(
+                visible = revealIcon,
+                enter = fadeIn(tween(500, easing = EaseInOutCubic)) +
+                        slideInVertically(tween(500, easing = EaseInOutCubic)) { it / 2 }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(100.dp)
+                        .scale(iconPulse)
+                        .background(Color(0xFF232323), CircleShape)
+                        .border(2.dp, Color(0xFFF59E0B), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CameraAlt,
+                        contentDescription = "Retro Camera Icon",
+                        tint = Color(0xFFF59E0B),
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(36.dp))
+
+            // ── Title ─────────────────────────────────────────────────────
+            AnimatedVisibility(
+                visible = revealTitle,
+                enter = fadeIn(tween(500, easing = EaseInOutCubic)) +
+                        slideInVertically(tween(500, easing = EaseInOutCubic)) { it / 2 }
+            ) {
+                Text(
+                    text = "ZOOM CAMERA",
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    letterSpacing = 3.sp,
+                    fontFamily = FontFamily.Serif
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // ── Tagline ───────────────────────────────────────────────────
+            AnimatedVisibility(
+                visible = revealTagline,
+                enter = fadeIn(tween(500, easing = EaseInOutCubic)) +
+                        slideInVertically(tween(500, easing = EaseInOutCubic)) { it / 2 }
+            ) {
+                Text(
+                    text = "RETRO FILM CAMERA",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Normal,
+                    color = Color(0xFFF59E0B).copy(alpha = 0.7f),
+                    letterSpacing = 4.sp,
+                    fontFamily = FontFamily.Serif
+                )
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // ── Description ───────────────────────────────────────────────
+            AnimatedVisibility(
+                visible = revealDesc,
+                enter = fadeIn(tween(600, easing = EaseInOutCubic)) +
+                        slideInVertically(tween(600, easing = EaseInOutCubic)) { it / 2 }
+            ) {
+                Text(
+                    text = "Capture vintage film-styled photos with our signature zoom box and warm retro filters. Grant camera access to begin.",
+                    fontSize = 15.sp,
+                    color = Color(0xFF9CA3AF),
+                    textAlign = TextAlign.Center,
+                    lineHeight = 24.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(48.dp))
+
+            // ── Button ────────────────────────────────────────────────────
+            AnimatedVisibility(
+                visible = revealButton,
+                enter = fadeIn(tween(600, easing = EaseInOutCubic)) +
+                        slideInVertically(tween(600, easing = EaseInOutCubic)) { it / 2 }
+            ) {
+                Box(
+                    modifier = Modifier
+                        .scale(buttonPulse)
+                        .fillMaxWidth(0.7f)
+                        .height(56.dp)
+                        .clip(RoundedCornerShape(30.dp))
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                listOf(
+                                    Color(0xFFF59E0B),
+                                    Color(0xFFD97706)
+                                )
+                            )
+                        )
+                        .clickable { onRequestPermission() }
+                        .testTag("enable_camera_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "ENABLE CAMERA",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                        letterSpacing = 1.5.sp,
+                        color = Color.Black
+                    )
+                }
+            }
+        }
+
+        // ── Version footer ────────────────────────────────────────────────
+        AnimatedVisibility(
+            visible = revealFooter,
+            enter = fadeIn(tween(800))
         ) {
             Text(
-                text = "ENABLE CAMERA",
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-                letterSpacing = 1.sp
+                text = "BHIG · v1.0",
+                color = Color(0xFFF59E0B).copy(alpha = 0.25f),
+                fontSize = 10.sp,
+                letterSpacing = 2.sp,
+                fontFamily = FontFamily.Serif,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 36.dp)
             )
         }
     }
@@ -1011,7 +1222,7 @@ fun PhotoViewerOverlay(
             contentAlignment = Alignment.Center
         ) {
             Card(
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f / 1.28f),
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f / 1.35f),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FAF9)),
                 shape = RoundedCornerShape(12.dp),
                 elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
