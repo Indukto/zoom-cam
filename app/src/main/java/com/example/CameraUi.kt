@@ -3,6 +3,7 @@ package com.example
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
@@ -53,7 +54,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
@@ -78,8 +81,6 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -139,6 +140,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
+import com.example.zoom.AspectRatio
 import com.example.zoom.CaptureExtension
 import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
@@ -686,6 +688,8 @@ fun CameraUi(
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
 
+    var showSettingsPage by remember { mutableStateOf(false) }
+
     val cameraPermissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
 
     LaunchedEffect(Unit) {
@@ -697,7 +701,17 @@ fun CameraUi(
         color = Color(0xFF121212)
     ) {
         if (cameraPermissionState.status.isGranted) {
-            CameraActiveScreen(viewModel = viewModel)
+            if (showSettingsPage) {
+                SettingsScreen(
+                    viewModel = viewModel,
+                    onClose = { showSettingsPage = false }
+                )
+            } else {
+                CameraActiveScreen(
+                    viewModel = viewModel,
+                    onOpenSettings = { showSettingsPage = true }
+                )
+            }
         } else {
             CameraPermissionOnboarding(
                 onRequestPermission = {
@@ -974,7 +988,7 @@ fun CameraPermissionOnboarding(
             enter = fadeIn(tween(800))
         ) {
             Text(
-                text = "BHIG · v1.0",
+                text = "Zoom Cam · v0.3",
                 color = Color(0xFFF59E0B).copy(alpha = 0.25f),
                 fontSize = 10.sp,
                 letterSpacing = 2.sp,
@@ -989,7 +1003,8 @@ fun CameraPermissionOnboarding(
 
 @Composable
 fun CameraActiveScreen(
-    viewModel: CameraViewModel
+    viewModel: CameraViewModel,
+    onOpenSettings: () -> Unit
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
@@ -1009,6 +1024,7 @@ fun CameraActiveScreen(
     val captureLensRole by viewModel.captureLensRole.collectAsState()
     val lensSwitchTrigger by viewModel.lensSwitchTrigger.collectAsState()
     val showGridLines by viewModel.showGridLines.collectAsState()
+    val aspectRatio by viewModel.aspectRatio.collectAsState()
 
     // Cross-fade the grid in/out so flipping the aux toggle never reads as a hard snap.
     val gridAlpha by animateFloatAsState(
@@ -1070,9 +1086,14 @@ fun CameraActiveScreen(
         val totalWidth = maxWidth
         val totalHeight = maxHeight
 
-        // Viewfinder bounds (4:3 portrait box at top)
+        // Viewfinder bounds — width fixed at 92% of screen, height adapts to
+        // the selected portrait aspect ratio. With 4:3 portrait (height/width
+        // = 1.35) the box is 1.23× its width, with 3:2 (1.5) it's 1.38×,
+        // and with 1:1 it's exactly the width. The zoom-box clamp + the
+        // Canvas overlay both keep working unchanged because they already
+        // size themselves from vfWidth / aspectRatio.
         val vfWidth = totalWidth * 0.92f
-        val vfHeight = vfWidth * 4f / 3f
+        val vfHeight = vfWidth * aspectRatio.heightToWidth
         val vfTop = 56.dp
         val vfX = (totalWidth - vfWidth) / 2f
 
@@ -1182,10 +1203,24 @@ fun CameraActiveScreen(
         }
 
         if (showZoomBox) {
-            val zoomBoxTop = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
+            // Aspect-ratio-aware box dimensions: box height = box width × heightToWidth.
+            // When the natural box height exceeds the viewfinder height (e.g. 3:2
+            // portrait at full boxFraction), clamp height to vfHeight and re-derive
+            // width so the selected ratio is preserved within the available space.
+            val ratioFraction = aspectRatio.heightToWidth
+            val naturalBoxW = vfWidth * animatedBoxWidthFraction
+            val naturalBoxH = naturalBoxW * ratioFraction
+            val (boxWf, boxHf) = if (naturalBoxH > vfHeight) {
+                (vfHeight / ratioFraction) to vfHeight
+            } else {
+                naturalBoxW to naturalBoxH
+            }
+            val zoomBoxTop = vfTop + (vfHeight - boxHf) / 2f
+            val boxCenterX = vfX + (vfWidth - boxWf) / 2f
+
             Canvas(modifier = Modifier.fillMaxSize()) {
-                val boxW = vfWidth.toPx() * animatedBoxWidthFraction
-                val boxH = boxW * 1.35f
+                val boxW = boxWf.toPx()
+                val boxH = boxHf.toPx()
                 val left = vfX.toPx() + (vfWidth.toPx() - boxW) / 2f
                 val top = vfTop.toPx() + (vfHeight.toPx() - boxH) / 2f
 
@@ -1225,19 +1260,19 @@ fun CameraActiveScreen(
             Box(
                 modifier = Modifier
                     .offset(
-                        x = vfX + (vfWidth - vfWidth * animatedBoxWidthFraction) / 2f,
-                        y = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
+                        x = boxCenterX,
+                        y = vfTop + (vfHeight - boxHf) / 2f
                     )
-                    .width(vfWidth * animatedBoxWidthFraction)
-                    .height(vfWidth * animatedBoxWidthFraction * 1.35f)
+                    .width(boxWf)
+                    .height(boxHf)
                     .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(20.dp))
             )
         }
 
 
         // Three-point settings menu button in the top-right corner of the viewfinder
-        var showSettingsMenu by remember { mutableStateOf(false) }
-
+        // Opens a full-screen Settings page; the actual page surface + back navigation
+        // lives in SettingsScreen at the top of CameraUi() (sibling swap, not overlay).
         Box(
             modifier = Modifier
                 .offset(x = vfX + vfWidth - 48.dp, y = vfTop + 8.dp)
@@ -1245,7 +1280,7 @@ fun CameraActiveScreen(
             IconButton(
                 onClick = {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    showSettingsMenu = true
+                    onOpenSettings()
                 },
                 modifier = Modifier.size(36.dp)
             ) {
@@ -1254,60 +1289,6 @@ fun CameraActiveScreen(
                     contentDescription = "Settings",
                     tint = Color.White,
                     modifier = Modifier.size(20.dp)
-                )
-            }
-
-            DropdownMenu(
-                expanded = showSettingsMenu,
-                onDismissRequest = { showSettingsMenu = false },
-                modifier = Modifier
-                    .background(Color(0xFF1E1E1E))
-                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-            ) {
-                val rawEnabled = rawAvailableForCurrentLens && !isFrontCamera
-                DropdownMenuItem(
-                    text = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                        ) {
-                            Text(text = "RAW Format", color = if (rawEnabled) Color.White else Color.White.copy(alpha = 0.3f), fontSize = 14.sp)
-                            Spacer(modifier = Modifier.width(24.dp))
-                            Switch(
-                                checked = rawModeEnabled,
-                                onCheckedChange = { viewModel.toggleRawMode(); haptic.performHapticFeedback(HapticFeedbackType.LongPress) },
-                                enabled = rawEnabled,
-                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFFBBF24), checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f), uncheckedThumbColor = Color.Gray, uncheckedTrackColor = Color.DarkGray)
-                            )
-                        }
-                    },
-                    onClick = { if (rawEnabled) { viewModel.toggleRawMode(); haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
-                )
-
-                val nightEnabled = (CaptureExtension.NIGHT in availableExtensions || !extensionsProbeDone) && !isFrontCamera
-                val isNightModeActive = activeExtension == CaptureExtension.NIGHT
-                DropdownMenuItem(
-                    text = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                        ) {
-                            Text(text = "Night Mode", color = if (nightEnabled) Color.White else Color.White.copy(alpha = 0.3f), fontSize = 14.sp)
-                            Spacer(modifier = Modifier.width(24.dp))
-                            Switch(
-                                checked = isNightModeActive,
-                                onCheckedChange = {
-                                    viewModel.setExtension(if (isNightModeActive) CaptureExtension.NONE else CaptureExtension.NIGHT)
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                },
-                                enabled = nightEnabled,
-                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFFBBF24), checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f), uncheckedThumbColor = Color.Gray, uncheckedTrackColor = Color.DarkGray)
-                            )
-                        }
-                    },
-                    onClick = { if (nightEnabled) { viewModel.setExtension(if (isNightModeActive) CaptureExtension.NONE else CaptureExtension.NIGHT); haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
                 )
             }
         }
@@ -1762,6 +1743,23 @@ fun PhotoViewerOverlay(
     var exifData by remember(photo) { mutableStateOf(ExifData()) }
     LaunchedEffect(photo) { exifData = viewModel.readExifData(photo) }
 
+    // Read each photo's actual on-disk pixel dimensions so the gallery card
+    // renders at the real capture aspect ratio (1:1 / 2:3 portrait / 3:4
+    // portrait) instead of always forcing 4:3 landscape. BitmapFactory with
+    // inJustDecodeBounds = true does a header-only decode (no pixels), so
+    // it runs in milliseconds even for the full capture directory.
+    var photoDims by remember(photo) { mutableStateOf<IntSize?>(null) }
+    LaunchedEffect(photo) {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(photo.absolutePath, options)
+        val w = options.outWidth
+        val h = options.outHeight
+        if (w > 0 && h > 0) photoDims = IntSize(w, h)
+    }
+    // width/height ratio: 1:1 → 1.0, 3:4 portrait → 0.75, 2:3 portrait → 0.667.
+    // 1f / 1.35f fallback matches the legacy 4:3 assumption while bounds load.
+    val photoAspect = photoDims?.let { d -> d.width.toFloat() / d.height.toFloat() } ?: (1f / 1.35f)
+
     val phoneName = Build.MODEL
     BackHandler(onBack = onClose)
 
@@ -1821,7 +1819,7 @@ fun PhotoViewerOverlay(
             contentAlignment = Alignment.Center
         ) {
             Card(
-                modifier = Modifier.fillMaxWidth().aspectRatio(1f / 1.35f),
+                modifier = Modifier.fillMaxWidth().aspectRatio(photoAspect),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FAF9)),
                 shape = RoundedCornerShape(12.dp),
                 elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
@@ -1863,6 +1861,274 @@ fun PhotoViewerOverlay(
                     ) {
                         Image(painter = rememberAsyncImagePainter(model = item), contentDescription = "Filmstrip photo", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }
+                }
+            }
+        }
+    }
+}
+
+// =====================================================================================
+// Full-screen Settings page
+// =====================================================================================
+// The three-point MoreVert in CameraActiveScreen no longer pops a DropdownMenu; instead
+// it raises the `showSettingsPage` flag at the top of CameraUi(), which sibling-swaps
+// the active surface to this SettingsScreen. Back arrow + system back both return to
+// the live camera via onClose().
+@Composable
+private fun SettingsScreen(viewModel: CameraViewModel, onClose: () -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    val rawModeEnabled by viewModel.rawModeEnabled.collectAsState()
+    val rawAvailableForCurrentLens by viewModel.rawAvailableForCurrentLens.collectAsState()
+    val isFrontCamera by viewModel.isFrontCamera.collectAsState()
+    val activeExtension by viewModel.activeExtension.collectAsState()
+    val availableExtensions by viewModel.availableExtensions.collectAsState()
+    val extensionsProbeDone by viewModel.extensionsProbeDone.collectAsState()
+    val aspectRatio by viewModel.aspectRatio.collectAsState()
+
+    // Intercept system back to dismiss the settings page back to the camera.
+    BackHandler(onBack = onClose)
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color(0xFF0E0E0E)
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, end = 16.dp, top = 24.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onClose() }
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Close settings",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Settings",
+                    color = Color.White,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.5.sp
+                )
+            }
+
+            // Section header chip
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                color = Color.White.copy(alpha = 0.08f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    text = "CAPTURE",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.5.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+
+            // Scrollable body
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp)
+            ) {
+                Spacer(modifier = Modifier.height(4.dp))
+
+                SettingsRow(
+                    label = "RAW Format",
+                    subtitle = "Capture unprocessed sensor data for professional editing (DNG)",
+                    checked = rawModeEnabled,
+                    enabled = rawAvailableForCurrentLens && !isFrontCamera,
+                    onCheckedChange = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.toggleRawMode()
+                    }
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    text = "ASPECT RATIO",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.5.sp,
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 6.dp)
+                )
+                AspectRatioChips(
+                    selected = aspectRatio,
+                    onSelect = { newRatio ->
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.setAspectRatio(newRatio)
+                    }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                SettingsRow(
+                    label = "Night Mode",
+                    subtitle = when {
+                        isFrontCamera -> "Not available on the front camera"
+                        !extensionsProbeDone -> "Checking lens support\u2026"
+                        CaptureExtension.NIGHT in availableExtensions -> "Long-exposure night capture"
+                        else -> "Not supported by the current lens"
+                    },
+                    checked = activeExtension == CaptureExtension.NIGHT,
+                    enabled = (CaptureExtension.NIGHT in availableExtensions || !extensionsProbeDone) && !isFrontCamera,
+                    onCheckedChange = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val currently = activeExtension == CaptureExtension.NIGHT
+                        viewModel.setExtension(if (currently) CaptureExtension.NONE else CaptureExtension.NIGHT)
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(36.dp))
+
+                Text(
+                    text = "Zoom \u2022 Camera",
+                    color = Color.White.copy(alpha = 0.35f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Normal,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsRow(
+    label: String,
+    subtitle: String? = null,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    val labelAlpha = if (enabled) 1f else 0.4f
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF1A1A1A))
+            .clickable(enabled = enabled) {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                onCheckedChange(!checked)
+            }
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = Color.White.copy(alpha = labelAlpha),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (subtitle != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = subtitle,
+                    color = Color.White.copy(alpha = 0.55f * labelAlpha),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Normal,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color(0xFFFBBF24),
+                checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
+                uncheckedThumbColor = Color.Gray,
+                uncheckedTrackColor = Color.DarkGray
+            )
+        )
+    }
+}
+
+/**
+ * Three-pill chip row for selecting the photo aspect ratio.
+ *
+ * - 4:3 (Standard) -- the sensor's native portrait ratio, default for backward
+ *   compatibility with photos taken before this setting existed.
+ * - 3:2 (Tall) -- a slightly taller portrait crop that yields more aggressive
+ *   vertical framing (handy for portraits and street photography).
+ * - 1:1 (Square) -- Instagram-style square crop, centred on the viewfinder.
+ *
+ * Each pill shows its ratio label and a short descriptor. The selected pill is
+ * amber-tinted with an amber border; the rest sit on the neutral dark surface.
+ * Tapping a different pill fires `onSelect(newRatio)` (the ViewModel update
+ * triggers a recomposition that updates both the chip selection and the
+ * on-screen zoom-box rect).
+ */
+@Composable
+private fun AspectRatioChips(
+    selected: AspectRatio,
+    onSelect: (AspectRatio) -> Unit
+) {
+    val haptic = LocalHapticFeedback.current
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        AspectRatio.values().forEach { ratio ->
+            val isSelected = ratio == selected
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(58.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .border(
+                        width = 1.dp,
+                        color = if (isSelected) Color(0xFFFBBF24) else Color.Transparent,
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                    .clickable {
+                        if (ratio != selected) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onSelect(ratio)
+                        }
+                    },
+                color = if (isSelected) Color(0xFFFBBF24).copy(alpha = 0.18f) else Color(0xFF242424),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = ratio.label,
+                        color = if (isSelected) Color(0xFFFBBF24) else Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = when (ratio) {
+                            AspectRatio.RATIO_4_3 -> "Standard"
+                            AspectRatio.RATIO_3_2 -> "Tall"
+                            AspectRatio.RATIO_1_1 -> "Square"
+                        },
+                        color = Color.White.copy(alpha = 0.55f),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Normal
+                    )
                 }
             }
         }

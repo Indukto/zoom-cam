@@ -13,6 +13,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.zoom.AspectRatio
 import com.example.zoom.CaptureExtension
 import com.example.zoom.FovMapper
 import com.example.zoom.LensCatalog
@@ -112,8 +113,8 @@ class CameraViewModel : ViewModel() {
     private val _showGridLines = MutableStateFlow(false)
     val showGridLines: StateFlow<Boolean> = _showGridLines.asStateFlow()
 
-    private val _aspectRatio = MutableStateFlow("4:3")
-    val aspectRatio: StateFlow<String> = _aspectRatio.asStateFlow()
+    private val _aspectRatio = MutableStateFlow(AspectRatio.RATIO_4_3)
+    val aspectRatio: StateFlow<AspectRatio> = _aspectRatio.asStateFlow()
 
     // 0 = Off, 3 = 3 s, 10 = 10 s
     private val _selfTimerMode = MutableStateFlow(0)
@@ -259,7 +260,7 @@ class CameraViewModel : ViewModel() {
         _selfTimerMode.value = when (_selfTimerMode.value) { 0 -> 3; 3 -> 10; else -> 0 }
     }
     fun toggleDoubleExposure() { _doubleExposureActive.value = !_doubleExposureActive.value }
-    fun setAspectRatio(ratio: String) { if (ratio == "4:3" || ratio == "1:1") _aspectRatio.value = ratio }
+    fun setAspectRatio(ratio: AspectRatio) { _aspectRatio.value = ratio }
     fun setSelectedPhoto(file: File?) { _selectedPhoto.value = file }
 
     fun toggleTemperatureSlider() {
@@ -449,7 +450,7 @@ class CameraViewModel : ViewModel() {
         captureLensNativeFocalMm: Float? = null
     ) {
         _isCapturing.value = true
-        val currentAspectRatioMultiplier = if (_aspectRatio.value == "1:1") 1.0f else 1.35f
+        val currentAspectRatioMultiplier = _aspectRatio.value.heightToWidth
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val options = BitmapFactory.Options().apply { inMutable = true }
@@ -487,7 +488,18 @@ class CameraViewModel : ViewModel() {
                         bitmap = rotatedBitmap
                     }
 
-                    val finalBitmap = if (captureLensNativeFocalMm != null) {
+                    // Three-stage crop pipeline. Runs left-to-right:
+                    //   1. Lens-based digital zoom (only when shooting beyond the
+                    //      capture lens's native focal length, e.g. digital tele on
+                    //      the Primary lens). Magnifies the sensor output via a
+                    //      centered crop.
+                    //   2. Aspect-ratio crop (ALWAYS). Centers the result to the
+                    //      target portrait ratio. This is the bugfix for the stale
+                    //      4:3 output when the user picked 3:2 or 1:1 in Settings.
+                    //   3. Live zoom-box crop (only when zoomed in and no lens crop
+                    //      was applied). Layers the editor's framing on top of the
+                    //      aspect-ratio base.
+                    val lensCropped = if (captureLensNativeFocalMm != null) {
                         val cropFactor = (captureLensNativeFocalMm / captureFocalLength).coerceIn(0f, 1f)
                         if (cropFactor < 0.99f) {
                             val cropW = (bitmap.width * cropFactor).toInt().coerceAtLeast(1)
@@ -500,13 +512,23 @@ class CameraViewModel : ViewModel() {
                                 cropped
                             } catch (e: Exception) { Log.e("CameraViewModel", "Error center-cropping", e); bitmap }
                         } else { bitmap }
-                    } else if (boxWidthFraction < 0.99f) {
-                        try {
-                            val cropped = cropBitmapToZoomBox(bitmap, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
-                            if (cropped != bitmap) { bitmap.recycle() }
-                            cropped
-                        } catch (e: Exception) { Log.e("CameraViewModel", "Error cropping", e); bitmap }
                     } else { bitmap }
+
+                    val arCropped = try {
+                        val c = centerCropToAspectRatio(lensCropped, currentAspectRatioMultiplier)
+                        if (c != lensCropped && lensCropped !== bitmap) { lensCropped.recycle() }
+                        c
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Error aspect-ratio cropping", e); lensCropped
+                    }
+
+                    val finalBitmap = if (captureLensNativeFocalMm == null && boxWidthFraction < 0.99f) {
+                        try {
+                            val zoomed = cropBitmapToZoomBox(arCropped, boxWidthFraction, screenWidth, screenHeight, currentAspectRatioMultiplier)
+                            if (zoomed != arCropped) { arCropped.recycle() }
+                            zoomed
+                        } catch (e: Exception) { Log.e("CameraViewModel", "Error zoom-box cropping", e); arCropped }
+                    } else { arCropped }
 
                     val processedBitmap = if (_temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f) {
                         finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value)
@@ -599,6 +621,46 @@ class CameraViewModel : ViewModel() {
         val wCrop = ((wBox / screenWidth) * wVisible).toInt().coerceIn(1, bitmap.width - xCropStart)
         val hCrop = ((hBox / screenHeight) * hVisible).toInt().coerceIn(1, bitmap.height - yCropStart)
         return Bitmap.createBitmap(bitmap, xCropStart, yCropStart, wCrop, hCrop)
+    }
+
+    /**
+     * Centers [bitmap] to the portrait ratio described by [heightToWidth].
+     *
+     * Inputs are assumed to be already EXIF-corrected and (if applicable)
+     * selfie-mirrored, so the bitmap is in screen-natural orientation. The
+     * target ratio is `width/height = 1 / heightToWidth` (e.g. heightToWidth
+     * = 1.35 for 4:3 portrait → target w/h = 0.741; heightToWidth = 1.5 for
+     * 3:2 portrait → 0.667; heightToWidth = 1.0 for 1:1 → 1.0).
+     *
+     * If the bitmap's actual width/height ratio is within a 2% tolerance of
+     * the target, the bitmap is returned unchanged. Otherwise a centered
+     * crop is computed: if the bitmap is wider than target, crop the sides;
+     * if it's taller, crop the top/bottom.
+     *
+     * This is the always-on portion of the crop pipeline \u2014 aspect ratio is
+     * honored even when the user is at 1.0\u00d7 zoom with no lens-based crop,
+     * which the previous implementation did not do (the bug was that the
+     * `else { bitmap }` branch on a non-zoom capture preserved the sensor's
+     * native 4:3 ratio regardless of the user's aspect-ratio choice).
+     */
+    private fun centerCropToAspectRatio(bitmap: Bitmap, heightToWidth: Float): Bitmap {
+        val w = bitmap.width.toFloat()
+        val h = bitmap.height.toFloat()
+        if (w <= 0f || h <= 0f || heightToWidth <= 0f) return bitmap
+        val actualRatio = w / h                  // bitmap's current width/height
+        val targetRatio = 1f / heightToWidth     // desired width/height
+        if (kotlin.math.abs(actualRatio - targetRatio) < 0.02f) return bitmap
+        return if (actualRatio > targetRatio) {
+            // Bitmap is wider than target -> crop sides to match.
+            val targetW = (h * targetRatio).toInt().coerceIn(1, bitmap.width)
+            val cropX = ((w - targetW) / 2f).toInt().coerceAtLeast(0)
+            Bitmap.createBitmap(bitmap, cropX, 0, targetW, bitmap.height)
+        } else {
+            // Bitmap is taller than target -> crop top/bottom to match.
+            val targetH = (w / targetRatio).toInt().coerceIn(1, bitmap.height)
+            val cropY = ((h - targetH) / 2f).toInt().coerceAtLeast(0)
+            Bitmap.createBitmap(bitmap, 0, cropY, bitmap.width, targetH)
+        }
     }
 
     fun deletePhoto(context: Context, file: File) {
