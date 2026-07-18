@@ -1,93 +1,157 @@
-
-
 # 📸 ZoomBox Camera
 
-**ZoomBox Camera** is a professional, retro-themed camera application built for Android. It combines the aesthetic charm of vintage film photography with modern mobile camera technology. 
-
-Featuring a unique "Zoom Box" framing interface, it simulates the experience of shooting with classic prime lenses (35mm, 50mm, 85mm) while applying real-time retro filters, exposure adjustments, and analog-style date stamps.
+**ZoomBox Camera** is a professional, retro-themed camera application for Android built with Jetpack Compose and CameraX. It features a unique "Zoom Box" framing overlay that shows the exact crop area before capture, combined with vintage film-style color processing and tactile manual controls.
 
 ---
 
+[![Screenshot-20260718-192853.png](https://i.postimg.cc/JzLvjMzg/Screenshot-20260718-192853.png)](https://postimg.cc/qz11TfnX) [![Screenshot-20260718-192912.png](https://i.postimg.cc/0ysF7PyV/Screenshot-20260718-192912.png)](https://postimg.cc/ZCwwSk3N)
 
-[![Screenshot-20260717-165407.png](https://i.postimg.cc/9FDzv1xx/Screenshot-20260717-165407.png)](https://postimg.cc/ZChTNPz3) [![Screenshot-20260717-211453.png](https://i.postimg.cc/bvmD4RDL/Screenshot-20260717-211453.png)](https://postimg.cc/HJ7kyXt7)
-
+---
 
 ## ✨ Key Features
 
-*   **Cinematic Zoom Box**: A signature 4:3 framing overlay that guides your composition and defines the final crop area.
-*   **Lens Preset Simulations**:
-    *   **35mm**: Wide-angle "street photography" field of view.
-    *   **50mm**: The classic "nifty fifty" natural perspective.
-    *   **85mm**: Tight portrait framing with compressed depth.
-*   **Manual Exposure & Tint**: Tactile sliders to adjust exposure compensation (-3 to +3) and color temperature (Warm Amber to Cool Teal).
-*   **Retro Film Processing**:
-    *   Real-time warming/cooling tints.
-    *   Dynamic vignette effect for focused subjects.
-    *   **Analog Date Stamp**: Iconic orange-glow timestamp (e.g., JUL 16 2026) embedded directly in the shot.
-*   **Minimalist Interface**: High-contrast, slate-dark UI designed for professional focus and ease of use.
-*   **Gallery Integration**: Instantly view and manage your captured film-style photos.
+### 🎯 Zoom Box Framing
+A live 4:3 overlay on the viewfinder that previews the exact crop area of the final image. When using the PRIMARY lens with digital zoom (1×–3×), the zoom box visually scales to indicate the captured region, so you frame your shot *exactly* as it will be saved.
+
+### 🔭 Multi-Lens System
+- **Ultra-Wide** (~13mm) — expansive landscape and architectural shots.
+- **Primary** (≈24mm native, 1×–3× digital zoom) — the main shooter with smooth zoom-box feedback.
+- **Tele** (~116mm) — compressed perspective for portraits and distant subjects.
+
+Digital zoom on the PRIMARY lens is backed by a center crop from the full-resolution sensor, preserving maximum image quality.
+
+### 🎛️ Manual Controls
+- **Exposure Compensation** (−3 to +3 EV, ⅒-stop granularity) — brighten or darken before capture.
+- **Color Temperature** (2300 K–9000 K) — from cool teal to warm amber with a live viewfinder tint overlay.
+- **Flash Modes** — Auto / On / Off.
+- **Front/Back Camera Toggle** — with automatic mirror-flip for selfies.
+
+### 🎞️ Retro Film Processing
+- Real-time warming/cooling tints applied to the viewfinder and final image.
+- Brightness offset via exposure compensation.
+- **Vignette effect** — a subtle radial darkening that pulls focus to the subject.
+- All processing is applied losslessly to the final JPEG after capture, respecting the original EXIF data.
+
+### 🖼️ In-App Gallery
+- View captured photos in a film-style card layout with EXIF metadata (focal length, shutter speed, ISO).
+- Scrollable filmstrip for quick navigation between shots.
+- Share via system share sheet or delete unwanted captures.
+- Photos are saved to device gallery (`Pictures/ZoomBoxCamera`) with rename pattern `*_<focal>mm.jpg`.
+
+### 🧩 Clean Architecture
+- **MVVM** with Kotlin StateFlows for reactive UI.
+- **Modular camera domain** (`zoom/` package) for lens enumeration, FOV mapping, and capture orchestration.
+- 100% **Jetpack Compose** UI — modern, declarative, and maintainable.
 
 ---
 
 ## 🛠 Tech Stack
 
-*   **Jetpack Compose**: 100% declarative UI for a modern, fluid user experience.
-*   **CameraX**: Robust and reliable camera integration for preview, image capture, and lens control.
-*   **MVVM Architecture**: Clean separation of concerns for maintainability and scalability.
-*   **Kotlin Coroutines & Flow**: Efficient asynchronous data handling and state management.
-*   **Coil**: Optimized image loading for the gallery view.
-*   **Material 3**: Utilizing modern design components with a custom "Retro Slate" theme.
+| Layer          | Technology                                |
+|----------------|-------------------------------------------|
+| UI             | Jetpack Compose + Material 3              |
+| Camera         | CameraX (`Preview` + `ImageCapture`)      |
+| Architecture   | MVVM (ViewModel + StateFlow)              |
+| Async          | Kotlin Coroutines & Flow                  |
+| Image Loading  | Coil (`rememberAsyncImagePainter`)        |
+| Permissions    | Accompanist Permissions API               |
+| Image Effects  | `ColorMatrix`, `PorterDuff`, `RadialGradient` (custom) |
+| EXIF Handling  | Android `ExifInterface`                   |
+| Build          | Gradle with Kotlin DSL + Version Catalog  |
 
 ---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
+- **Android Studio** Ladybug (2024.2.1) or newer.
+- **Android device/emulator** running API 24+ (Android 7.0).
 
-*   **Android Studio**: Ladybug (2024.2.1) or newer recommended.
-*   **Android Device**: Running Android 7.0 (API 24) or higher.
+### Setup
 
-### Setup Instructions
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Indukto/Bhig.git
+   cd Bhig
+   ```
 
-1.  **Clone the Repository**:
-    ```bash
-    git clone https://github.com/your-repo/zoombox-camera.git
-    cd zoombox-camera
-    ```
+2. **Configure environment (optional):**
+   The project supports a `.env` file at the project root for an optional API key:
+   ```env
+   GEMINI_API_KEY=your_key_here
+   ```
+   *(See `.env.example` for the template.)*
 
-2.  **Configure API Keys**:
-    This app uses Gemini AI for advanced features. Create a `.env` file in the root directory and add your API key:
-    ```env
-    GEMINI_API_KEY=your_actual_key_here
-    ```
-    *(See `.env.example` for reference)*
+3. **Open in Android Studio:**
+   - **File → Open** and select the project directory.
+   - Let Gradle sync complete.
 
-3.  **Open in Android Studio**:
-    *   Select **File > Open** and choose the project directory.
-    *   Allow Android Studio to fix any incompatibilities as it imports the project.
-
-4.  **Build and Run**:
-    *   Select your device/emulator.
-    *   Click the **Run** (green triangle) button.
+4. **Build and run:**
+   - Select your target device.
+   - Click **Run** (▶).
 
 ---
 
 ## 🏗 Project Structure
 
-```text
-app/
-├── src/main/java/com/example/
-│   ├── ui/theme/         # Custom Retro Slate theme definitions
-│   ├── CameraUi.kt       # Main UI entry point and components
-│   ├── CameraViewModel.kt # Business logic and state management
-│   ├── CameraPreviewView.kt # CameraX integration and viewfinder logic
 ```
+app/
+└── src/main/java/com/example/
+    ├── MainActivity.kt              # Single-activity entry point
+    ├── CameraUi.kt                  # All Compose screens & components
+    ├── CameraViewModel.kt           # Business logic, capture pipeline, EXIF
+    ├── CameraPreviewView.kt         # CameraX lifecycle + preview bindings
+    ├── ui/theme/                    # Material 3 theme (Retro Slate)
+    └── zoom/
+        ├── LensProfile.kt           # Lens metadata model
+        ├── LensCatalog.kt           # Runtime lens enumeration (Camera2)
+        ├── FovMapper.kt             # Field-of-view → box scale math
+        ├── ZoomBoxCalculator.kt     # Pure-math zoom-box rect computation
+        ├── PreviewSessionManager.kt # CameraX preview-session lifecycle
+        └── CaptureController.kt     # Image capture + file handling
+
+app/src/test/java/com/example/zoom/
+    └── FovMapperTest.kt             # Unit tests for FOV mapping
+```
+
+---
+
+## 🧠 How the Zoom Box Works
+
+1. The viewfinder shows the **full sensor field of view**.
+2. When `boxScale < 1.0`, a semi-transparent black mask is drawn over the viewfinder with a **rounded-rect cutout** — this is the zoom box.
+3. The zoom box aspect ratio is fixed at **1 : 1.35** (≈4:3 portrait).
+4. On capture, `cropBitmapToZoomBox()` computes the pixel region matching the box and crops the full-resolution image accordingly.
+5. The crop coordinates are derived from screen dimensions, the box fraction, and the sensor-to-screen scale, so the saved image pixel-for-pixel matches what was visible inside the box.
+
+---
+
+## 🧪 Testing
+
+Run the unit tests from the terminal:
+
+```bash
+./gradlew testDebugUnitTest
+```
+
+Or in Android Studio: right-click `app/src/test/` → **Run Tests**.
+
+---
+
+## 🎨 Design Philosophy
+
+- **Tactile, minimal UI** — high-contrast slate theme with amber accents inspired by vintage rangefinder cameras.
+- **No viewfinder chrome** — the camera preview fills the screen edge-to-edge (with rounded corners) for maximum immersion.
+- **Slider controls** — custom `SpectrumSlider` with haptic feedback, gradient tracks, and double-tap-to-reset.
+- **Film-card gallery** — each photo is presented inside a card resembling a print from a vintage film roll, complete with camera model and exposure data.
 
 ---
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
 
 > [!TIP]
-> For the best "ZoomBox" experience, try shooting in well-lit environments to capture the fine details of the film grain and color tints.
+> For the best results, shoot in well-lit environments to make the film-grain effect and color grading really pop. Try framing subjects with the zoom box to create intentional, precisely composed shots.
