@@ -625,17 +625,6 @@ fun CameraActiveScreen(
 
         if (showZoomBox) {
             val zoomBoxTop = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
-            // Focal length above zoom box
-            Text(
-                text = "${effectiveFocalLength}mm",
-                color = Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Serif,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset(y = zoomBoxTop - 20.dp)
-            )
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val boxW = vfWidth.toPx() * animatedBoxWidthFraction
                 val boxH = boxW * 1.35f
@@ -650,6 +639,18 @@ fun CameraActiveScreen(
                     drawRect(color = Color.Black.copy(alpha = 0.65f))
                 }
             }
+
+            // Focal length above zoom box (rendered above black mask)
+            Text(
+                text = "${effectiveFocalLength}mm",
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Serif,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .offset(y = zoomBoxTop - 30.dp)
+            )
 
             // Zoom box outline
             Box(
