@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">ZoomBox Camera</string>
+    <string name="camerax_attribution_label">Camera Capture and Processing</string>
 </resources>

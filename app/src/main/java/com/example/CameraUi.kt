@@ -820,6 +820,7 @@ fun CameraActiveScreen(
             flashMode = flashMode,
             isFrontCamera = isFrontCamera,
             activeExtension = activeExtension,
+            isRawCapturing = isCapturing && rawModeEnabled,
             onZoomChanged = { viewModel.setZoom(it) },
             onZoomTick = {
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)

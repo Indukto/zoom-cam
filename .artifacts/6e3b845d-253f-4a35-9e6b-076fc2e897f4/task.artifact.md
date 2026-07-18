@@ -1,0 +1,13 @@
+- [x] Declare CameraX attribution in manifest
+    - [x] Add string resource for attribution label
+    - [x] Update AndroidManifest.xml
+- [x] Fix RAW capture hardware contention
+    - [x] Update CameraPreviewView.kt to release camera during RAW capture
+- [x] Improve RawCapture session handling and logging
+    - [x] Update RawCapture.kt with better logging and error suppression
+- [x] Update Gallery and ViewModel
+    - [x] Update CameraViewModel.kt loadPhotos to include .dng
+    - [x] Refine captureAndSaveRaw in CameraViewModel.kt
+- [ ] Verify fix
+    - [ ] Check Logcat for successful RAW capture logs
+    - [ ] Verify DNG visibility in app gallery

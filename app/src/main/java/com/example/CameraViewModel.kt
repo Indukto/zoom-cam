@@ -137,7 +137,7 @@ class CameraViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             val directory = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
             val files = directory?.listFiles { file ->
-                file.isFile && (file.extension.lowercase() == "jpg" || file.extension.lowercase() == "jpeg")
+                file.isFile && (file.extension.lowercase() in listOf("jpg", "jpeg", "dng"))
             }?.sortedByDescending { it.lastModified() } ?: emptyList()
             _capturedPhotos.value = files
         }
@@ -350,10 +350,16 @@ class CameraViewModel : ViewModel() {
             onCaptured = { dngFile ->
                 saveDngToGallery(context, dngFile)
                 loadPhotos(context)
+                android.widget.Toast.makeText(context, "RAW saved: ${dngFile.name}", android.widget.Toast.LENGTH_SHORT).show()
                 _isCapturing.value = false
             },
             onError = { e ->
                 Log.e("CameraViewModel", "RAW capture failed", e)
+                android.widget.Toast.makeText(
+                    context,
+                    "RAW capture failed: ${e.localizedMessage ?: "unknown error"}",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
                 _isCapturing.value = false
             }
         )

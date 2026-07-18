@@ -201,6 +201,7 @@ fun CameraPreviewView(
     flashMode: Int,
     isFrontCamera: Boolean,
     activeExtension: CaptureExtension = CaptureExtension.NONE,
+    isRawCapturing: Boolean = false,
     onZoomChanged: (Float) -> Unit,
     onZoomTick: () -> Unit = {},
     onAvailableFocalLengths: (List<Float>) -> Unit,
@@ -241,9 +242,18 @@ fun CameraPreviewView(
         onLensCatalogReady?.invoke(result)
     }
 
-    // Bind camera — rebinds on lens role, front/back, or extension change
-    LaunchedEffect(selectedLensRole, isFrontCamera, activeExtension) {
+    // Bind camera — rebinds on lens role, front/back, extension change, or RAW capture start
+    LaunchedEffect(selectedLensRole, isFrontCamera, activeExtension, isRawCapturing) {
         val cp = try { cameraProviderFuture.get() } catch (e: Exception) { null } ?: return@LaunchedEffect
+
+        if (isRawCapturing) {
+            // RELEASE the camera so RawCapture (Camera2) can take over exclusively.
+            // Contention for the same camera device usually leads to CAMERA_ERROR(3).
+            cp.unbindAll()
+            camera = null
+            return@LaunchedEffect
+        }
+
         val executor = ContextCompat.getMainExecutor(context)
 
         try {

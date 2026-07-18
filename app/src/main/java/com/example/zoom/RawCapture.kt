@@ -87,7 +87,15 @@ object RawCapture {
 
         fun cleanup() {
             try { imageReader?.close() } catch (_: Exception) {}
-            try { camera?.close() } catch (_: Exception) {}
+            try {
+                // If the session is still active, closing the device might trigger
+                // HAL errors. Closing the session first is safer, but on some
+                // devices stopRepeating() fails if no preview was running.
+                session?.close()
+                camera?.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Cleanup exception (ignorable): ${e.message}")
+            }
             cameraThread.quitSafely()
         }
 
@@ -137,7 +145,15 @@ object RawCapture {
                 else -> 0
             }
             // DNG orientation: rotate sensor image into device-natural, then by display rotation.
-            val dngRotation = (sensorOrientation + deviceRotation + 360) % 360
+            // DngCreator.setOrientation() expects EXIF orientation values, not raw degrees:
+            //   0° → 1, 90° → 6, 180° → 3, 270° → 8
+            val dngCwRotation = (sensorOrientation + deviceRotation + 360) % 360
+            val dngExifOrientation = when (dngCwRotation) {
+                90 -> 6
+                180 -> 3
+                270 -> 8
+                else -> 1
+            }
 
             // Pair the Image and TotalCaptureResult before writing the DNG.
             // Either may arrive first; both are required by DngCreator.
@@ -147,10 +163,11 @@ object RawCapture {
             fun tryWriteDng() {
                 val img = pendingImage ?: return
                 val res = pendingResult ?: return
+                Log.d(TAG, "Both RAW image and metadata arrived. Writing DNG...")
                 try {
-                    val dng = DngCreator(characteristics, res)
+                    val dng = DngCreator(physicalChars, res)
                     dng.setDescription("ZoomBox Camera RAW capture")
-                    dng.setOrientation(dngRotation)
+                    dng.setOrientation(dngExifOrientation)
                     FileOutputStream(photoFile).use { out ->
                         dng.writeImage(out, img)
                     }
@@ -167,6 +184,7 @@ object RawCapture {
             imageReader.setOnImageAvailableListener({ reader ->
                 try {
                     val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                    Log.d(TAG, "RAW image arrived: ${image.width}x${image.height}")
                     pendingImage = image
                     tryWriteDng()
                 } catch (e: Exception) {
@@ -190,6 +208,7 @@ object RawCapture {
                                     flashMode = flashMode,
                                     handler = cameraHandler,
                                     onStillResult = { result ->
+                                        Log.d(TAG, "RAW TotalCaptureResult arrived")
                                         pendingResult = result
                                         tryWriteDng()
                                     },
@@ -252,19 +271,24 @@ object RawCapture {
         physicalCameraId: String
     ): Boolean {
         return try {
-            val chars = cameraManager.getCameraCharacteristics(physicalCameraId)
-            val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
-                ?: return false
-            if (capabilities.none { it == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW }) {
-                // Physical sub-camera may not list RAW even though logical does;
-                // fall back to the logical capabilities before giving up.
-                val logicalCaps = cameraManager.getCameraCharacteristics(logicalCameraId)
-                    .get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: return false
-                if (logicalCaps.none { it == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW }) {
-                    return false
-                }
-            }
-            val configMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val physicalChars = cameraManager.getCameraCharacteristics(physicalCameraId)
+            val logicalChars = cameraManager.getCameraCharacteristics(logicalCameraId)
+
+            val physicalCapabilities = physicalChars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+            val logicalCapabilities = logicalChars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+
+            // At least one of physical or logical must advertise RAW capability.
+            val hasRawCapability = physicalCapabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW) ||
+                    logicalCapabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+            if (!hasRawCapability) return false
+
+            // Check for RAW_SENSOR output sizes: prefer physical camera, fall back to logical.
+            val candidateChars = if (physicalChars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    ?.getOutputSizes(ImageFormat.RAW_SENSOR)
+                    ?.isNotEmpty() == true
+            ) physicalChars else logicalChars
+
+            val configMap = candidateChars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 ?: return false
             val sizes = configMap.getOutputSizes(ImageFormat.RAW_SENSOR)
             !sizes.isNullOrEmpty()
@@ -275,11 +299,17 @@ object RawCapture {
     }
 
     /**
-     * Runs a precapture 3A convergence sequence, then submits the actual
-     * TEMPLATE_STILL_CAPTURE request. We hold AE/AF in AUTO and trigger a
-     * precapture metering pass, waiting until CONTROL_AE_STATE becomes
-     * CONVERGED or FLASH_REQUIRED before firing the still. This mirrors what
-     * a JPEG TEMPLATE_STILL_CAPTURE would normally do internally.
+     * Fires a single TEMPLATE_STILL_CAPTURE for the RAW sensor.
+     *
+     * We do NOT run a repeating preview or AE precapture sequence here because
+     * the RAW_SENSOR ImageReader has a very small buffer (maxImages=2). A
+     * repeating request targeting the reader surface would fill those slots
+     * instantly, causing "max images 2 has already been acquired" when the
+     * actual still capture tries to deliver its result.
+     *
+     * TEMPLATE_STILL_CAPTURE already handles 3A convergence internally on
+     * most HALs, so a direct capture is sufficient and avoids the buffer
+     * exhaustion problem.
      */
     private fun runPrecaptureThenStill(
         session: CameraCaptureSession,
@@ -291,12 +321,11 @@ object RawCapture {
         onStillResult: (TotalCaptureResult) -> Unit,
         onFailure: (Int) -> Unit
     ) {
-        val aeAvailable = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
-        val canAePrecapture = aeAvailable?.contains(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START) == true
-
-        // Apply the requested flash policy to both the precapture repeating and
-        // the final still.
-        fun applyAeFlash(req: CaptureRequest.Builder) {
+        try {
+            val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            req.addTarget(readerSurface)
+            req.set(CaptureRequest.CONTROL_AE_LOCK, false)
+            req.set(CaptureRequest.CONTROL_AWB_LOCK, false)
             when (flashMode) {
                 0 -> req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
                 1 -> req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
@@ -305,116 +334,27 @@ object RawCapture {
                     req.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
                 }
             }
-        }
-
-        fun buildStill(): CaptureRequest {
-            val req = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-            req.addTarget(readerSurface)
-            req.set(CaptureRequest.CONTROL_AE_LOCK, false)
-            req.set(CaptureRequest.CONTROL_AWB_LOCK, false)
-            applyAeFlash(req)
-            // Apply the same HQ ISP keys we use for JPEG stills when supported.
             applyRawQualityKeys(req, characteristics)
-            return req.build()
-        }
 
-        fun captureStill() {
-            try {
-                session.stopRepeating()
-                session.capture(buildStill(), object : CameraCaptureSession.CaptureCallback() {
-                    override fun onCaptureCompleted(
-                        session: CameraCaptureSession,
-                        request: CaptureRequest,
-                        result: TotalCaptureResult
-                    ) {
-                        onStillResult(result)
-                    }
-
-                    override fun onCaptureFailed(
-                        session: CameraCaptureSession,
-                        request: CaptureRequest, failure: CaptureFailure
-                    ) {
-                        onFailure(failure.reason)
-                    }
-                }, handler)
-            } catch (e: Exception) {
-                Log.e(TAG, "Still capture failed", e)
-                onFailure(-1)
-            }
-        }
-
-        if (!canAePrecapture) {
-            captureStill()
-            return
-        }
-
-        // Repeating preview-ish request so AE can converge before precapture.
-        val repeating = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-        repeating.addTarget(readerSurface)
-        applyAeFlash(repeating)
-        repeating.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE)
-        session.setRepeatingRequest(repeating.build(), object : CameraCaptureSession.CaptureCallback() {
-            override fun onCaptureCompleted(
-                session: CameraCaptureSession,
-                request: CaptureRequest,
-                result: TotalCaptureResult
-            ) {
-                // Trigger precapture once AE reaches a known state.
-                triggerPrecapture(session, camera, handler) { converged ->
-                    if (converged) captureStill() else onFailure(-2)
-                }
-            }
-        }, handler)
-    }
-
-    /**
-     * Fire the AE precapture trigger and wait for CONVERGED/FLASH_REQUIRED.
-     * Resolves [onDone] exactly once.
-     */
-    private fun triggerPrecapture(
-        session: CameraCaptureSession,
-        camera: CameraDevice,
-        handler: Handler,
-        onDone: (Boolean) -> Unit
-    ) {
-        val resolved = java.util.concurrent.atomic.AtomicBoolean(false)
-        fun done(ok: Boolean) { if (resolved.compareAndSet(false, true)) onDone(ok) }
-
-        val trigger = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-        // We don't have a preview surface here; reuse the reader surface.
-        // Some HALs reject a precapture with no preview target, so guard it.
-        try {
-            trigger.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
-            session.capture(trigger.build(), object : CameraCaptureSession.CaptureCallback() {
+            session.capture(req.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
                     session: CameraCaptureSession,
                     request: CaptureRequest,
                     result: TotalCaptureResult
                 ) {
-                    val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
-                    when (aeState) {
-                        CaptureResult.CONTROL_AE_STATE_CONVERGED,
-                        CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED -> done(true)
-                        CaptureResult.CONTROL_AE_STATE_PRECAPTURE -> {
-                            // wait for next callback
-                        }
-                        else -> {
-                            // Keep waiting; HAL will report CONVERGED eventually.
-                        }
-                    }
+                    onStillResult(result)
                 }
 
                 override fun onCaptureFailed(
                     session: CameraCaptureSession,
                     request: CaptureRequest, failure: CaptureFailure
-                ) { done(false) }
+                ) {
+                    onFailure(failure.reason)
+                }
             }, handler)
-
-            // Bounded wait: if convergence doesn't arrive in 2.5s, proceed anyway.
-            handler.postDelayed({ done(true) }, 2500)
         } catch (e: Exception) {
-            Log.w(TAG, "precapture trigger failed; firing still directly", e)
-            done(true)
+            Log.e(TAG, "Still capture failed", e)
+            onFailure(-1)
         }
     }
 
