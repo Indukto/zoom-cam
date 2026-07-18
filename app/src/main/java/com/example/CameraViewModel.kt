@@ -330,7 +330,7 @@ class CameraViewModel : ViewModel() {
                     values.put(MediaStore.Images.Media.IS_PENDING, 0)
                     resolver.update(uri, values, null, null)
                 }
-                Log.d("CameraViewModel", "Photo saved to gallery: ${file.name}")
+
             }
         } catch (e: Exception) { Log.e("CameraViewModel", "Error saving to gallery", e) }
     }
