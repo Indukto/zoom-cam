@@ -6,23 +6,21 @@ import android.hardware.camera2.CameraManager
 import android.util.Log
 import android.view.WindowManager
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import java.util.concurrent.Executor
 
 /**
- * Manages the live preview session, handling lens transitions and telephoto pre-warming.
+ * Manages the live preview session, handling lens transitions.
  *
- * The preview shows either Ultra-wide or Primary lens (never Telephoto) based on
- * FovMapper.previewLens(). When the target focal length approaches the telephoto
- * threshold, preWarmTele() opens a background session on the Tele lens so it's
- * ready at capture time, minimizing shutter latency.
+ * Uses Camera2Interop.Extender.setPhysicalCameraId() to route Preview and
+ * ImageCapture use cases to the specific physical camera (ultra-wide, primary,
+ * or tele) within the logical multi-camera device.
  */
 data class BindResult(
     val camera: Camera,
@@ -40,23 +38,26 @@ class PreviewSessionManager(
     }
 
     /**
-     * Builds a CameraSelector targeting a specific physical camera ID.
+     * Builds a CameraSelector targeting a logical camera by its CameraX ID.
+     * Physical sub-cameras live inside the logical camera; they are selected
+     * via Camera2Interop.Extender.setPhysicalCameraId() on each use case.
      */
-    fun buildSelectorForPhysicalCamera(physicalCameraId: String): CameraSelector {
+    fun buildSelectorForLogicalCamera(logicalCameraId: String): CameraSelector {
         return CameraSelector.Builder()
             .addCameraFilter { cameras ->
                 cameras.filter { camera ->
-                    Camera2CameraInfo.from(camera).cameraId == physicalCameraId
+                    Camera2CameraInfo.from(camera).cameraId == logicalCameraId
                 }
             }
             .build()
     }
 
     /**
-     * Binds a preview + ImageCapture use case to the specified physical camera.
-     * This is the primary method for switching the preview lens (UW ↔ Primary).
+     * Binds a preview + ImageCapture use case to a specific physical camera
+     * within a logical multi-camera device.
      *
      * @param cameraProvider The ProcessCameraProvider
+     * @param logicalCameraId The parent logical camera ID
      * @param physicalCameraId The target physical camera ID
      * @param surfaceProvider The Preview.SurfaceProvider from the PreviewView
      * @param flashMode Flash mode: 0 = Auto, 1 = On, 2 = Off
@@ -64,6 +65,7 @@ class PreviewSessionManager(
      */
     fun bindPreview(
         cameraProvider: ProcessCameraProvider,
+        logicalCameraId: String,
         physicalCameraId: String,
         surfaceProvider: Preview.SurfaceProvider,
         flashMode: Int = 0
@@ -73,6 +75,9 @@ class PreviewSessionManager(
             val rotation = windowManager.defaultDisplay.rotation
 
             val preview = Preview.Builder()
+                .apply {
+                    Camera2Interop.Extender(this).setPhysicalCameraId(physicalCameraId)
+                }
                 .build()
                 .apply { setSurfaceProvider(surfaceProvider) }
 
@@ -80,6 +85,7 @@ class PreviewSessionManager(
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .setTargetRotation(rotation)
                 .apply {
+                    Camera2Interop.Extender(this).setPhysicalCameraId(physicalCameraId)
                     when (flashMode) {
                         0 -> setFlashMode(ImageCapture.FLASH_MODE_AUTO)
                         1 -> setFlashMode(ImageCapture.FLASH_MODE_ON)
@@ -88,7 +94,7 @@ class PreviewSessionManager(
                 }
                 .build()
 
-            val selector = buildSelectorForPhysicalCamera(physicalCameraId)
+            val selector = buildSelectorForLogicalCamera(logicalCameraId)
 
             cameraProvider.unbindAll()
             val camera = cameraProvider.bindToLifecycle(
@@ -99,7 +105,7 @@ class PreviewSessionManager(
             )
             BindResult(camera, newImageCapture)
         } catch (e: Exception) {
-            Log.e(TAG, "Error binding preview to $physicalCameraId", e)
+            Log.e(TAG, "Error binding preview to physical=$physicalCameraId logical=$logicalCameraId", e)
             null
         }
     }
