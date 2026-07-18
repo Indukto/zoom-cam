@@ -7,6 +7,7 @@ import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.core.content.ContextCompat
@@ -68,6 +69,12 @@ import androidx.compose.material.icons.rounded.Thermostat
 import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Lightbulb
+import androidx.compose.material.icons.rounded.GridOn
+import androidx.compose.material.icons.rounded.GridOff
+import androidx.compose.material.icons.rounded.FilterNone
+import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -95,6 +102,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -910,6 +918,7 @@ fun CameraActiveScreen(
     val previewLensRole by viewModel.previewLensRole.collectAsState()
     val captureLensRole by viewModel.captureLensRole.collectAsState()
     val lensSwitchTrigger by viewModel.lensSwitchTrigger.collectAsState()
+    val showGridLines by viewModel.showGridLines.collectAsState()
 
     val showTempSlider by viewModel.showTemperatureSlider.collectAsState()
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
@@ -923,6 +932,8 @@ fun CameraActiveScreen(
 
     val mainExecutor = ContextCompat.getMainExecutor(context)
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+    var timerCountdown by remember { mutableStateOf(-1) }
 
     // Probe OEM extension availability whenever the lens switches (or on first
     // entry). Extensions are per-logical-camera, so re-query on every rebinding.
@@ -966,6 +977,7 @@ fun CameraActiveScreen(
         val vfWidth = totalWidth * 0.92f
         val vfHeight = vfWidth * 4f / 3f
         val vfTop = 56.dp
+        val vfX = (totalWidth - vfWidth) / 2f
 
         // 1. Black background
         Box(modifier = Modifier.fillMaxSize().background(Color.Black))
@@ -1029,125 +1041,22 @@ fun CameraActiveScreen(
             )
         }
 
-        // Three-point settings menu button in the top-right corner of the viewfinder
-        var showSettingsMenu by remember { mutableStateOf(false) }
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(12.dp)
-        ) {
-            IconButton(
-                onClick = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    showSettingsMenu = true
-                },
-                modifier = Modifier
-                    .size(36.dp)
-                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+        // Countdown timer overlay
+        if (timerCountdown > 0) {
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)),
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.MoreVert,
-                    contentDescription = "Settings",
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            DropdownMenu(
-                expanded = showSettingsMenu,
-                onDismissRequest = { showSettingsMenu = false },
-                modifier = Modifier
-                    .background(Color(0xFF1E1E1E))
-                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-            ) {
-                val rawEnabled = rawAvailableForCurrentLens && !isFrontCamera
-                DropdownMenuItem(
-                    text = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                        ) {
-                            Text(
-                                text = "RAW Format",
-                                color = if (rawEnabled) Color.White else Color.White.copy(alpha = 0.3f),
-                                fontSize = 14.sp
-                            )
-                            Spacer(modifier = Modifier.width(24.dp))
-                            Switch(
-                                checked = rawModeEnabled,
-                                onCheckedChange = {
-                                    viewModel.toggleRawMode()
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                },
-                                enabled = rawEnabled,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color(0xFFFBBF24),
-                                    checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
-                                    uncheckedThumbColor = Color.Gray,
-                                    uncheckedTrackColor = Color.DarkGray
-                                )
-                            )
-                        }
-                    },
-                    onClick = {
-                        if (rawEnabled) {
-                            viewModel.toggleRawMode()
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        }
-                    }
-                )
-
-                val nightEnabled = (CaptureExtension.NIGHT in availableExtensions || !extensionsProbeDone) && !isFrontCamera
-                val isNightModeActive = activeExtension == CaptureExtension.NIGHT
-                DropdownMenuItem(
-                    text = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
-                        ) {
-                            Text(
-                                text = "Night Mode",
-                                color = if (nightEnabled) Color.White else Color.White.copy(alpha = 0.3f),
-                                fontSize = 14.sp
-                            )
-                            Spacer(modifier = Modifier.width(24.dp))
-                            Switch(
-                                checked = isNightModeActive,
-                                onCheckedChange = {
-                                    if (isNightModeActive) {
-                                        viewModel.setExtension(CaptureExtension.NONE)
-                                    } else {
-                                        viewModel.setExtension(CaptureExtension.NIGHT)
-                                    }
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                },
-                                enabled = nightEnabled,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color(0xFFFBBF24),
-                                    checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f),
-                                    uncheckedThumbColor = Color.Gray,
-                                    uncheckedTrackColor = Color.DarkGray
-                                )
-                            )
-                        }
-                    },
-                    onClick = {
-                        if (nightEnabled) {
-                            if (isNightModeActive) {
-                                viewModel.setExtension(CaptureExtension.NONE)
-                            } else {
-                                viewModel.setExtension(CaptureExtension.NIGHT)
-                            }
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        }
-                    }
+                Text(
+                    text = "$timerCountdown",
+                    color = Color(0xFFFBBF24),
+                    fontSize = 80.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Serif
                 )
             }
         }
-        }
+        } // end viewfinder Box
 
         // Box scale animation
         val animatedBoxWidthFraction by animateFloatAsState(
@@ -1157,9 +1066,6 @@ fun CameraActiveScreen(
         )
 
         val showZoomBox = selectedLensRole == LensRole.PRIMARY && animatedBoxWidthFraction < 0.99f
-
-        // Zoom box mask — positioned relative to viewfinder
-        val vfX = (totalWidth - vfWidth) / 2f
 
         if (showZoomBox) {
             val zoomBoxTop = vfTop + (vfHeight - vfWidth * animatedBoxWidthFraction * 1.35f) / 2f
@@ -1203,17 +1109,94 @@ fun CameraActiveScreen(
             )
         }
 
-        // 4. Controls capsule — positioned above bottom deck
+
+        // Three-point settings menu button in the top-right corner of the viewfinder
+        var showSettingsMenu by remember { mutableStateOf(false) }
+
         Box(
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 140.dp)
+                .offset(x = vfX + vfWidth - 48.dp, y = vfTop + 8.dp)
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.fillMaxWidth()
+            IconButton(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    showSettingsMenu = true
+                },
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), CircleShape)
             ) {
-                // Slider popup
+                Icon(
+                    imageVector = Icons.Rounded.MoreVert,
+                    contentDescription = "Settings",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            DropdownMenu(
+                expanded = showSettingsMenu,
+                onDismissRequest = { showSettingsMenu = false },
+                modifier = Modifier
+                    .background(Color(0xFF1E1E1E))
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+            ) {
+                val rawEnabled = rawAvailableForCurrentLens && !isFrontCamera
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Text(text = "RAW Format", color = if (rawEnabled) Color.White else Color.White.copy(alpha = 0.3f), fontSize = 14.sp)
+                            Spacer(modifier = Modifier.width(24.dp))
+                            Switch(
+                                checked = rawModeEnabled,
+                                onCheckedChange = { viewModel.toggleRawMode(); haptic.performHapticFeedback(HapticFeedbackType.LongPress) },
+                                enabled = rawEnabled,
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFFBBF24), checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f), uncheckedThumbColor = Color.Gray, uncheckedTrackColor = Color.DarkGray)
+                            )
+                        }
+                    },
+                    onClick = { if (rawEnabled) { viewModel.toggleRawMode(); haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
+                )
+
+                val nightEnabled = (CaptureExtension.NIGHT in availableExtensions || !extensionsProbeDone) && !isFrontCamera
+                val isNightModeActive = activeExtension == CaptureExtension.NIGHT
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        ) {
+                            Text(text = "Night Mode", color = if (nightEnabled) Color.White else Color.White.copy(alpha = 0.3f), fontSize = 14.sp)
+                            Spacer(modifier = Modifier.width(24.dp))
+                            Switch(
+                                checked = isNightModeActive,
+                                onCheckedChange = {
+                                    viewModel.setExtension(if (isNightModeActive) CaptureExtension.NONE else CaptureExtension.NIGHT)
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                enabled = nightEnabled,
+                                colors = SwitchDefaults.colors(checkedThumbColor = Color(0xFFFBBF24), checkedTrackColor = Color(0xFFFBBF24).copy(alpha = 0.5f), uncheckedThumbColor = Color.Gray, uncheckedTrackColor = Color.DarkGray)
+                            )
+                        }
+                    },
+                    onClick = { if (nightEnabled) { viewModel.setExtension(if (isNightModeActive) CaptureExtension.NONE else CaptureExtension.NIGHT); haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
+                )
+            }
+        }
+
+        // Floating Control Capsule + Slider popup centered inside the bottom of the viewfinder
+        Box(
+            modifier = Modifier
+                .offset(y = vfTop + vfHeight - 60.dp)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 AnimatedVisibility(
                     visible = showTempSlider || showExpSlider,
                     enter = fadeIn() + slideInVertically(initialOffsetY = { 20 }),
@@ -1228,87 +1211,38 @@ fun CameraActiveScreen(
                             .width(300.dp)
                     ) {
                         if (showTempSlider) {
-                            WhiteBalancePanel(
-                                temperature = temperature,
-                                tint = tint,
-                                onValueChange = { tempVal, tintVal ->
-                                    viewModel.setTemperature(tempVal)
-                                    viewModel.setTint(tintVal)
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                            )
+                            WhiteBalancePanel(temperature = temperature, tint = tint, onValueChange = { tempVal, tintVal ->
+                                viewModel.setTemperature(tempVal); viewModel.setTint(tintVal)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            })
                         } else if (showExpSlider) {
-                            ExposurePanel(
-                                exposure = exposure,
-                                onValueChange = {
-                                    viewModel.setExposure(it)
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
-                            )
+                            ExposurePanel(exposure = exposure, onValueChange = { viewModel.setExposure(it); haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) })
                         }
                     }
                 }
 
-                // Control capsule
                 Row(
                     modifier = Modifier
-                        .background(Color(0xFF1C1C1E), RoundedCornerShape(32.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(32.dp))
-                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // Temperature
-                    IconButton(
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = if (showTempSlider) Color(0xFF2C2C2E) else Color.Transparent),
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Thermostat,
-                            contentDescription = "Temperature",
-                            tint = if (temperature > 0f) Color(0xFFF59E0B) else if (temperature < 0f) Color(0xFF0EA5E9) else Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
+                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleGridLines() }, modifier = Modifier.size(32.dp)) {
+                        Icon(imageVector = if (showGridLines) Icons.Rounded.GridOn else Icons.Rounded.GridOff, contentDescription = "Grid", tint = if (showGridLines) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
                     }
-
-                    // Lens selector
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .background(Color(0xFF2C2C2E), CircleShape)
-                            .clickable {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                viewModel.cycleLens()
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        val lensLabel = "${effectiveFocalLength}"
-                        Text(
-                            text = lensLabel,
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Serif
-                        )
+                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() }, modifier = Modifier.size(32.dp)) {
+                        Icon(imageVector = Icons.Rounded.Thermostat, contentDescription = "Temperature", tint = if (temperature != 0f || tint != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
                     }
-
-                    // Exposure
-                    IconButton(
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleExposureSlider() },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = if (showExpSlider) Color(0xFF2C2C2E) else Color.Transparent),
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.WbSunny,
-                            contentDescription = "Exposure Compensation",
-                            tint = if (exposure != 0f) Color(0xFFFBBF24) else Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
+                    Box(modifier = Modifier.height(28.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.15f)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cycleLens() }.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "${effectiveFocalLength.toInt()}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    }
+                    Row(modifier = Modifier.clip(RoundedCornerShape(14.dp)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleExposureSlider() }.padding(horizontal = 6.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(imageVector = Icons.Rounded.WbSunny, contentDescription = "Exposure", tint = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
+                        Text(text = "${exposure.toInt()}", color = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     }
                 }
-
-                // RAW and Night Mode have been moved to the three-dot menu in the viewfinder.
             }
         }
 
@@ -1321,32 +1255,201 @@ fun CameraActiveScreen(
             Box(modifier = Modifier.fillMaxSize().background(Color.White))
         }
 
-        // 6. Bottom Deck Controls
-        Box(
+        // 6. Bottom Deck Controls (two-row Dazz-cam style)
+        val activePreset by viewModel.activePreset.collectAsState()
+        val selfTimerMode by viewModel.selfTimerMode.collectAsState()
+        val doubleExposureActive by viewModel.doubleExposureActive.collectAsState()
+        var showPresetPicker by remember { mutableStateOf(false) }
+
+        // Lambda that executes the actual capture, extracted so timer can call it
+        val doCapture: () -> Unit = {
+            viewModel.playShutterSound()
+            flashFlashActive = true
+            val catalog = LensCatalog(context)
+            val result = catalog.enumerate()
+            val currentLens = when (selectedLensRole) {
+                LensRole.ULTRA_WIDE -> result.ultraWide
+                LensRole.PRIMARY    -> result.primary
+                LensRole.TELE      -> result.tele
+            }
+            if (rawModeEnabled && currentLens != null) {
+                viewModel.captureAndSaveRaw(
+                    context = context,
+                    logicalCameraId = currentLens.logicalCameraId,
+                    physicalCameraId = currentLens.physicalCameraId,
+                    focalLengthMm = effectiveFocalLength
+                )
+            } else {
+                val captureDevice = activeImageCapture
+                if (captureDevice != null) {
+                    val isDigitalZoomActive = selectedLensRole == LensRole.PRIMARY
+                    val nativeFocalForCrop = if (isDigitalZoomActive) result.primary?.equivFocalMm else null
+                    triggerImageCapture(
+                        context = context,
+                        imageCapture = captureDevice,
+                        executor = mainExecutor,
+                        onCaptured = { rawFile ->
+                            viewModel.processAndSavePhoto(
+                                context = context,
+                                rawFile = rawFile,
+                                boxWidthFraction = animatedBoxWidthFraction,
+                                screenWidth = totalWidth.value,
+                                screenHeight = totalHeight.value,
+                                captureFocalLength = effectiveFocalLength,
+                                captureLensNativeFocalMm = nativeFocalForCrop
+                            )
+                        },
+                        onCaptureError = { exc ->
+                            Log.e("CameraActiveScreen", "Capture failed", exc)
+                        }
+                    )
+                }
+            }
+        }
+
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(Color.Black.copy(alpha = 0.9f))
-                .padding(bottom = 36.dp, top = 20.dp)
-                .padding(horizontal = 24.dp)
+                .background(Color.Black)
+                .padding(bottom = 40.dp, top = 0.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(0.dp)
         ) {
+            // ── Row 1: Auxiliary Controls ──────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 28.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Gallery / Import button
+                IconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        if (capturedPhotos.isNotEmpty()) viewModel.setSelectedPhoto(capturedPhotos.first())
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
+                    modifier = Modifier.size(40.dp).testTag("gallery_import_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.PhotoLibrary,
+                        contentDescription = "Gallery",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Double Exposure toggle
+                IconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.toggleDoubleExposure()
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = if (doubleExposureActive) Color(0xFF6366F1) else Color(0xFF1C1C1E)
+                    ),
+                    modifier = Modifier.size(40.dp).testTag("double_exposure_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.FilterNone,
+                        contentDescription = "Double Exposure",
+                        tint = if (doubleExposureActive) Color.White else Color.Gray,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Self-timer cycle button
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(
+                            if (selfTimerMode != 0) Color(0xFF1C1C1E) else Color(0xFF1C1C1E),
+                            CircleShape
+                        )
+                        .clip(CircleShape)
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.cycleSelfTimer()
+                        }
+                        .testTag("self_timer_button"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (selfTimerMode == 0) {
+                        Icon(
+                            imageVector = Icons.Rounded.Timer,
+                            contentDescription = "Timer Off",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Text(
+                            text = "${selfTimerMode}s",
+                            color = Color(0xFFFBBF24),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Flash toggle
+                IconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.toggleFlash()
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
+                    modifier = Modifier.size(40.dp).testTag("flash_toggle_button")
+                ) {
+                    Icon(
+                        imageVector = when (flashMode) {
+                            0    -> Icons.Rounded.FlashAuto
+                            1    -> Icons.Rounded.FlashOn
+                            else -> Icons.Rounded.FlashOff
+                        },
+                        contentDescription = "Flash",
+                        tint = if (flashMode == 2) Color.Gray else Color(0xFFFBBF24),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // Camera flip
+                IconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.toggleCamera()
+                    },
+                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
+                    modifier = Modifier.size(40.dp).testTag("camera_flip_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.FlipCameraAndroid,
+                        contentDescription = "Flip Camera",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            // ── Row 2: Primary Actions ─────────────────────────────────────────
             Box(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
                 contentAlignment = Alignment.Center
             ) {
-                // Gallery button (left)
+                // Left: last-captured thumbnail card
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
-                        .size(54.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF1E1E1E))
-                        .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF1C1C1E))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(14.dp))
                         .clickable {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            if (capturedPhotos.isNotEmpty()) {
-                                viewModel.setSelectedPhoto(capturedPhotos.first())
-                            }
+                            if (capturedPhotos.isNotEmpty()) viewModel.setSelectedPhoto(capturedPhotos.first())
                         }
                         .testTag("gallery_button"),
                     contentAlignment = Alignment.Center
@@ -1354,126 +1457,172 @@ fun CameraActiveScreen(
                     if (capturedPhotos.isNotEmpty()) {
                         Image(
                             painter = rememberAsyncImagePainter(model = capturedPhotos.first()),
-                            contentDescription = "Last captured photo",
+                            contentDescription = "Last photo",
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp))
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Rounded.PhotoLibrary,
-                            contentDescription = "Empty Gallery",
+                            contentDescription = "No photos",
                             tint = Color.Gray,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
 
-                // Shutter Button
+                // Center: Shutter button (large, white ring with red fill)
                 Box(
                     modifier = Modifier
-                        .size(80.dp)
-                        .background(Color(0xFF2C2C2E), CircleShape)
-                        .border(4.dp, Color(0xFFE5E7EB), CircleShape)
-                        .padding(4.dp)
+                        .size(84.dp)
+                        .background(Color.Transparent, CircleShape)
+                        .border(4.dp, Color.White, CircleShape)
+                        .padding(5.dp)
                         .testTag("shutter_button")
-                        .clickable(enabled = !isCapturing) {
+                        .clickable(enabled = !isCapturing && timerCountdown < 0) {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.playShutterSound()
-                            flashFlashActive = true
-
-                            val catalog = LensCatalog(context)
-                            val result = catalog.enumerate()
-                            val currentLens = when (selectedLensRole) {
-                                LensRole.ULTRA_WIDE -> result.ultraWide
-                                LensRole.PRIMARY -> result.primary
-                                LensRole.TELE -> result.tele
-                            }
-
-                            if (rawModeEnabled && currentLens != null) {
-                                // ── RAW/DNG path ───────────────────────────
-                                viewModel.captureAndSaveRaw(
-                                    context = context,
-                                    logicalCameraId = currentLens.logicalCameraId,
-                                    physicalCameraId = currentLens.physicalCameraId,
-                                    focalLengthMm = effectiveFocalLength
-                                )
+                            if (selfTimerMode == 0) {
+                                doCapture()
                             } else {
-                                // ── JPEG path (existing) ───────────────────
-                                val captureDevice = activeImageCapture
-                                if (captureDevice != null) {
-                                    val isDigitalZoomActive = selectedLensRole == LensRole.PRIMARY
-                                    val nativeFocalForCrop = if (isDigitalZoomActive) result.primary?.equivFocalMm else null
-
-                                    triggerImageCapture(
-                                        context = context,
-                                        imageCapture = captureDevice,
-                                        executor = mainExecutor,
-                                        onCaptured = { rawFile ->
-                                            viewModel.processAndSavePhoto(
-                                                context = context,
-                                                rawFile = rawFile,
-                                                boxWidthFraction = animatedBoxWidthFraction,
-                                                screenWidth = totalWidth.value,
-                                                screenHeight = totalHeight.value,
-                                                captureFocalLength = effectiveFocalLength,
-                                                captureLensNativeFocalMm = nativeFocalForCrop
-                                            )
-                                        },
-                                        onCaptureError = { exc ->
-                                            Log.e("CameraActiveScreen", "Capture failed", exc)
-                                        }
-                                    )
+                                // Start countdown
+                                coroutineScope.launch {
+                                    timerCountdown = selfTimerMode
+                                    repeat(selfTimerMode) {
+                                        kotlinx.coroutines.delay(1000L)
+                                        timerCountdown--
+                                    }
+                                    doCapture()
                                 }
                             }
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     val s by animateFloatAsState(
-                        targetValue = if (isCapturing) 0.85f else 1.0f,
-                        animationSpec = spring(dampingRatio = 0.6f),
+                        targetValue = if (isCapturing) 0.82f else 1.0f,
+                        animationSpec = spring(dampingRatio = 0.55f),
                         label = "shutter_scale"
                     )
                     Box(
-                        modifier = Modifier.fillMaxSize().scale(s).background(Color(0xFFEF4444), CircleShape)
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .scale(s)
+                            .background(Color(0xFFEF4444), CircleShape)
                     )
                 }
 
-                // Flash & Flip (right)
-                Row(
-                    modifier = Modifier.align(Alignment.CenterEnd),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // Right: Retro camera preset picker button
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF1C1C1E))
+                        .border(1.dp, Color(0xFFFBBF24).copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            showPresetPicker = true
+                        }
+                        .testTag("preset_picker_button"),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Flash
-                    IconButton(
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleFlash() },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
-                        modifier = Modifier.size(44.dp).testTag("flash_toggle_button")
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Icon(
-                            imageVector = when (flashMode) { 0 -> Icons.Rounded.FlashAuto; 1 -> Icons.Rounded.FlashOn; else -> Icons.Rounded.FlashOff },
-                            contentDescription = "Toggle Flash",
-                            tint = if (flashMode == 2) Color.Gray else Color(0xFFFBBF24),
-                            modifier = Modifier.size(18.dp)
+                        Text(
+                            text = "◉",
+                            color = Color(0xFFFBBF24),
+                            fontSize = 18.sp,
+                            fontFamily = FontFamily.Serif
                         )
-                    }
-
-                    // Flip camera
-                    IconButton(
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleCamera() },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E)),
-                        modifier = Modifier.size(44.dp).testTag("camera_flip_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.FlipCameraAndroid,
-                            contentDescription = "Flip Camera",
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
+                        Text(
+                            text = activePreset.displayName,
+                            color = Color.White,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            modifier = Modifier.padding(horizontal = 2.dp)
                         )
                     }
                 }
             }
         }
+
+        // Preset Picker Dialog
+        if (showPresetPicker) {
+            AlertDialog(
+                onDismissRequest = { showPresetPicker = false },
+                title = {
+                    Text(
+                        "Film Style",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        RetroCameraPreset.values().forEach { preset ->
+                            val selected = preset == activePreset
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (selected) Color(0xFFFBBF24).copy(alpha = 0.15f)
+                                        else Color(0xFF2C2C2E)
+                                    )
+                                    .border(
+                                        1.dp,
+                                        if (selected) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.08f),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        viewModel.setCameraPreset(preset)
+                                        showPresetPicker = false
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column {
+                                    Text(
+                                        text = preset.displayName,
+                                        color = if (selected) Color(0xFFFBBF24) else Color.White,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = 15.sp
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            if (preset.tempOffset > 0) append("Warm") else if (preset.tempOffset < 0) append("Cool") else append("Neutral")
+                                            append(" · ")
+                                            val expStr = if (preset.exposureOffset > 0) "+${preset.exposureOffset}" else "${preset.exposureOffset}"
+                                            append("EV $expStr")
+                                        },
+                                        color = Color.Gray,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                if (selected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Check,
+                                        contentDescription = null,
+                                        tint = Color(0xFFFBBF24),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {},
+                containerColor = Color(0xFF1E1E1E),
+                tonalElevation = 0.dp
+            )
+        }
+
 
         // 7. Photo Viewer Overlay
         AnimatedVisibility(
@@ -1531,7 +1680,7 @@ fun PhotoViewerOverlay(
             }
 
             Text(
-                text = "CPM VINTAGE ROLL",
+                text = "Gallery",
                 fontSize = 15.sp, color = Color.White, fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp, fontFamily = FontFamily.Serif
             )

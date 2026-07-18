@@ -36,6 +36,18 @@ data class ExifData(
     val iso: String = "--"
 )
 
+enum class RetroCameraPreset(
+    val displayName: String,
+    val tempOffset: Float,
+    val tintOffset: Float,
+    val exposureOffset: Float
+) {
+    CLASSIC_U("Classic U", 0.6f, 0.2f, 0.0f),
+    DQS("DQS", -0.8f, -0.4f, 0.2f),
+    INSTA_C("Insta C", 0.4f, 0.6f, 0.4f),
+    GR_D("GR D", 0.0f, -0.2f, -0.3f)
+}
+
 class CameraViewModel : ViewModel() {
 
     private val _selectedLensRole = MutableStateFlow(LensRole.PRIMARY)
@@ -70,6 +82,9 @@ class CameraViewModel : ViewModel() {
     private val _tint = MutableStateFlow(0f)
     val tint: StateFlow<Float> = _tint.asStateFlow()
 
+    private val _activePreset = MutableStateFlow(RetroCameraPreset.CLASSIC_U)
+    val activePreset: StateFlow<RetroCameraPreset> = _activePreset.asStateFlow()
+
     private val _flashMode = MutableStateFlow(0)
     val flashMode: StateFlow<Int> = _flashMode.asStateFlow()
 
@@ -99,6 +114,13 @@ class CameraViewModel : ViewModel() {
 
     private val _aspectRatio = MutableStateFlow("4:3")
     val aspectRatio: StateFlow<String> = _aspectRatio.asStateFlow()
+
+    // 0 = Off, 3 = 3 s, 10 = 10 s
+    private val _selfTimerMode = MutableStateFlow(0)
+    val selfTimerMode: StateFlow<Int> = _selfTimerMode.asStateFlow()
+
+    private val _doubleExposureActive = MutableStateFlow(false)
+    val doubleExposureActive: StateFlow<Boolean> = _doubleExposureActive.asStateFlow()
 
     // ── RAW capture mode ──────────────────────────────────────────────────
     // When true, the shutter routes through RawCapture.captureDng() instead of
@@ -224,9 +246,19 @@ class CameraViewModel : ViewModel() {
     fun setExposure(value: Float) { _exposure.value = value.coerceIn(-3.0f, 3.0f) }
     fun setTemperature(value: Float) { _temperature.value = value.coerceIn(-2.0f, 2.0f) }
     fun setTint(value: Float) { _tint.value = value.coerceIn(-2.0f, 2.0f) }
+    fun setCameraPreset(preset: RetroCameraPreset) {
+        _activePreset.value = preset
+        setTemperature(preset.tempOffset)
+        setTint(preset.tintOffset)
+        setExposure(preset.exposureOffset)
+    }
     fun toggleFlash() { _flashMode.value = (_flashMode.value + 1) % 3 }
     fun toggleCamera() { _isFrontCamera.value = !_isFrontCamera.value }
     fun toggleGridLines() { _showGridLines.value = !_showGridLines.value }
+    fun cycleSelfTimer() {
+        _selfTimerMode.value = when (_selfTimerMode.value) { 0 -> 3; 3 -> 10; else -> 0 }
+    }
+    fun toggleDoubleExposure() { _doubleExposureActive.value = !_doubleExposureActive.value }
     fun setAspectRatio(ratio: String) { if (ratio == "4:3" || ratio == "1:1") _aspectRatio.value = ratio }
     fun setSelectedPhoto(file: File?) { _selectedPhoto.value = file }
 
