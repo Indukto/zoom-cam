@@ -111,6 +111,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -1086,16 +1087,32 @@ fun CameraActiveScreen(
         val totalWidth = maxWidth
         val totalHeight = maxHeight
 
-        // Viewfinder bounds — width fixed at 92% of screen, height adapts to
-        // the selected portrait aspect ratio. With 4:3 portrait (height/width
-        // = 1.35) the box is 1.23× its width, with 3:2 (1.5) it's 1.38×,
-        // and with 1:1 it's exactly the width. The zoom-box clamp + the
-        // Canvas overlay both keep working unchanged because they already
-        // size themselves from vfWidth / aspectRatio.
-        val vfWidth = totalWidth * 0.92f
+        // Orientation detection. BoxWithConstraints is preferred over
+        // LocalConfiguration.orientation because it also reacts to
+        // multi-window / foldable hinge changes. Portrait keeps the existing
+        // 92%-wide top-anchored layout; landscape pins the viewfinder to the
+        // left half and relocates the floating bubble + bottom deck below.
+        val isLandscape = maxWidth > maxHeight
+
+        // Viewfinder bounds.
+        //   portrait:  vfWidth = 0.92 × totalWidth; vfHeight = vfWidth × heightToWidth;
+        //              vfTop = 56.dp; vfX horizontally centred.
+        //   landscape: vfWidth = min(0.48 × totalWidth, (totalHeight - 16.dp) /
+        //              heightToWidth) — keeps viewfinder tall enough for any
+        //              selected aspect ratio without spilling past the screen;
+        //              vfHeight derived the same way; vfTop vertical-centred;
+        //              vfX pinned to 16.dp so the right half stays free for
+        //              the relocated deck.
+        val vfWidth = if (isLandscape) {
+            val limitedByWidth = totalWidth * 0.48f
+            val limitedByHeight = (totalHeight - 16.dp) / aspectRatio.heightToWidth
+            if (limitedByWidth < limitedByHeight) limitedByWidth else limitedByHeight
+        } else {
+            totalWidth * 0.92f
+        }
         val vfHeight = vfWidth * aspectRatio.heightToWidth
-        val vfTop = 56.dp
-        val vfX = (totalWidth - vfWidth) / 2f
+        val vfTop = if (isLandscape) (totalHeight - vfHeight) / 2f else 56.dp
+        val vfX = if (isLandscape) 16.dp else (totalWidth - vfWidth) / 2f
 
         // 1. Black background
         Box(modifier = Modifier.fillMaxSize().background(Color.Black))
@@ -1293,11 +1310,27 @@ fun CameraActiveScreen(
             }
         }
 
-        // Floating Control Capsule + Slider popup centered inside the bottom of the viewfinder
+        // Floating Control Capsule + Slider popup.
+        //   portrait:  centred horizontally, offset to vfTop + vfHeight - 60.dp.
+        //   landscape: align(Alignment.BottomEnd) of the right-half deck so it
+        //              sits above the relocated bottom deck; the slider popup
+        //              rides along because it's the first child of the parent
+        //              Column.
+        //   zIndex(1f) in landscape keeps the bubble's pill chrome painted ON
+        //   TOP of the translucent bottom deck (which is declared later in this
+        //   BoxWithConstraints body) — without it, the deck renders over the
+        //   bubble and tints the controls toward black.
         Box(
-            modifier = Modifier
-                .offset(y = vfTop + vfHeight - 60.dp)
-                .fillMaxWidth(),
+            modifier = if (isLandscape) {
+                Modifier
+                    .zIndex(1f)
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 16.dp)
+            } else {
+                Modifier
+                    .offset(y = vfTop + vfHeight - 60.dp)
+                    .fillMaxWidth()
+            },
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1327,21 +1360,21 @@ fun CameraActiveScreen(
 
                 Row(
                     modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(20.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(22.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() }, modifier = Modifier.size(32.dp)) {
-                        Icon(imageVector = Icons.Rounded.Thermostat, contentDescription = "Temperature", tint = if (temperature != 0f || tint != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
+                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() }, modifier = Modifier.size(44.dp)) {
+                        Icon(imageVector = Icons.Rounded.Thermostat, contentDescription = "Temperature", tint = if (temperature != 0f || tint != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(22.dp))
                     }
-                    Box(modifier = Modifier.height(28.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.15f)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cycleLens() }.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
-                        Text(text = "${effectiveFocalLength.toInt()}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Box(modifier = Modifier.height(40.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.15f)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cycleLens() }.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
+                        Text(text = "${effectiveFocalLength.toInt()}", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     }
-                    Row(modifier = Modifier.clip(RoundedCornerShape(14.dp)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleExposureSlider() }.padding(horizontal = 6.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(imageVector = Icons.Rounded.WbSunny, contentDescription = "Exposure", tint = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(16.dp))
-                        Text(text = "${exposure.toInt()}", color = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Row(modifier = Modifier.clip(RoundedCornerShape(14.dp)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleExposureSlider() }.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(imageVector = Icons.Rounded.WbSunny, contentDescription = "Exposure", tint = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(20.dp))
+                        Text(text = "${exposure.toInt()}", color = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -1408,13 +1441,22 @@ fun CameraActiveScreen(
         }
 
         Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Color.Black)
-                .padding(bottom = 40.dp, top = 0.dp),
+            modifier = if (isLandscape) {
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxWidth(0.5f)
+                    .fillMaxHeight(0.7f)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .padding(vertical = 16.dp)
+            } else {
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black)
+                    .padding(bottom = 40.dp, top = 0.dp)
+            },
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(0.dp)
+            verticalArrangement = if (isLandscape) Arrangement.spacedBy(20.dp) else Arrangement.spacedBy(0.dp)
         ) {
             // ── Row 1: Auxiliary Controls ──────────────────────────────────────
             Row(
@@ -1516,10 +1558,14 @@ fun CameraActiveScreen(
             }
 
             // ── Row 2: Primary Actions ─────────────────────────────────────────
+            // Horizontal padding shrinks to 12.dp in landscape so the three
+            // control buttons (gallery 56 + shutter 84 + preset 56 ≈ 196 dp
+            // total) fit inside the smaller right-half column without the
+            // contentAlignment.shift flag pulling the shutter off-centre.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
+                    .padding(horizontal = if (isLandscape) 12.dp else 24.dp),
                 contentAlignment = Alignment.Center
             ) {
                 // Left: last-captured thumbnail card

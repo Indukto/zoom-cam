@@ -1,2 +1,0 @@
-- [x] Create `README.md` with project details and setup instructions
-- [x] Verify `README.md` content
