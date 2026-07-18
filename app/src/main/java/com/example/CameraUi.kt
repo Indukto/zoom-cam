@@ -134,6 +134,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1091,12 +1092,38 @@ fun CameraActiveScreen(
         // 1.23× its width, with 3:2 (1.5) it's 1.38×, and with 1:1 it's exactly
         // the width. The zoom-box clamp + the Canvas overlay both keep working
         // unchanged because they already size themselves from vfWidth / aspectRatio.
-        // The same bounds apply in every device orientation: portrait or
-        // landscape, the viewfinder stays at this fixed size + top-anchored,
-        // so nothing on the UI jumps around when the user rotates the phone.
-        val vfWidth = totalWidth * 0.92f
-        val vfHeight = vfWidth * aspectRatio.heightToWidth
+        // The viewfinder + bottom deck + floating bubble stay anchored to these
+        // bounds in every device orientation; the activity rotates freely but the
+        // camera UI does NOT reposition. Only the SettingsScreen (a sibling of
+        // this composable at the top of CameraUi()) handles landscape so the
+        // setting icons adapt to a wider screen naturally.
+        // Top anchor (declared first so it's in scope for availableHeight below).
         val vfTop = 56.dp
+
+        // Height-aware clamp so the viewfinder + bubble + bottom deck stay
+        // within the available screen height in any orientation. There's no
+        // `isLandscape` detection: the clamp is purely height-driven and works
+        // identically in portrait or landscape. In portrait, the natural vfH
+        // (vfW × heightToWidth) is short enough that the original 92%-wide
+        // form is selected. In landscape, the natural vfH exceeds the screen
+        // height so we re-derive vfW from the clamped vfH and re-centre
+        // horizontally.
+        val vfWidthRaw = totalWidth * 0.92f
+        val vfHeightRaw = vfWidthRaw * aspectRatio.heightToWidth
+        // Reserve 200 dp at the bottom for the bubble (slider popup may open
+        // upward another ~120 dp) + the two-row bottom deck (~140 dp) so they
+        // never overlap the viewfinder in any orientation.
+        val reservedBottom = 200.dp
+        val availableHeight = (totalHeight - vfTop - reservedBottom).coerceAtLeast(120.dp)
+        val vfWidth: Dp
+        val vfHeight: Dp
+        if (vfHeightRaw > availableHeight) {
+            vfHeight = availableHeight
+            vfWidth = vfHeight / aspectRatio.heightToWidth
+        } else {
+            vfWidth = vfWidthRaw
+            vfHeight = vfHeightRaw
+        }
         val vfX = (totalWidth - vfWidth) / 2f
 
         // 1. Black background
@@ -1296,8 +1323,7 @@ fun CameraActiveScreen(
         }
 
         // Floating Control Capsule + Slider popup centered inside the bottom of the viewfinder.
-        // The bubble stays at the same vf-relative offset in every orientation
-        // so nothing on the UI moves when the device rotates.
+        // Single offset path: always 60 dp above the viewfinder bottom, full-width-centred.
         Box(
             modifier = Modifier
                 .offset(y = vfTop + vfHeight - 60.dp)
@@ -1411,6 +1437,8 @@ fun CameraActiveScreen(
             }
         }
 
+        // Bottom-deck Column anchored to the bottom of the screen, full width,
+        // opaque black background + 40 dp bottom padding for the gesture area.
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
