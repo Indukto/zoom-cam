@@ -4,14 +4,9 @@
 
 ---
 
-<<<<<<< HEAD
-[![Screenshot-20260718-192853.png](https://i.postimg.cc/JzLvjMzg/Screenshot-20260718-192853.png)](https://postimg.cc/qz11TfnX) [![Screenshot-20260718-192912.png](https://i.postimg.cc/0ysF7PyV/Screenshot-20260718-192912.png)](https://postimg.cc/ZCwwSk3N)
+[![Screenshot-20260718-192853.png](https://i.postimg.cc/JzLvjMzg/Screenshot-20260718-192853.png)](https://postimg.cc/qz11TfnX)  [![Screenshot-20260718-192912.png](https://i.postimg.cc/0ysF7PyV/Screenshot-20260718-192912.png)](https://postimg.cc/ZCwwSk3N) 
 
----
-=======
-[![Screenshot-20260718-192853.png](https://i.postimg.cc/JzLvjMzg/Screenshot-20260718-192853.png)](https://postimg.cc/qz11TfnX) [![Screenshot-20260718-192912.png](https://i.postimg.cc/0ysF7PyV/Screenshot-20260718-192912.png)](https://postimg.cc/ZCwwSk3N) 
 
->>>>>>> 747041ca45b68c58147ad4ba5d61e315db9a98f4
 
 ## ✨ Key Features
 
