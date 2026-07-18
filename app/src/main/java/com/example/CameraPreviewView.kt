@@ -45,6 +45,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.zoom.CaptureExtension
 import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
 import com.example.zoom.PreviewSessionManager
@@ -199,6 +200,7 @@ fun CameraPreviewView(
     exposure: Float,
     flashMode: Int,
     isFrontCamera: Boolean,
+    activeExtension: CaptureExtension = CaptureExtension.NONE,
     onZoomChanged: (Float) -> Unit,
     onZoomTick: () -> Unit = {},
     onAvailableFocalLengths: (List<Float>) -> Unit,
@@ -239,8 +241,8 @@ fun CameraPreviewView(
         onLensCatalogReady?.invoke(result)
     }
 
-    // Bind camera — rebinds on lens role or front/back change
-    LaunchedEffect(selectedLensRole, isFrontCamera) {
+    // Bind camera — rebinds on lens role, front/back, or extension change
+    LaunchedEffect(selectedLensRole, isFrontCamera, activeExtension) {
         val cp = try { cameraProviderFuture.get() } catch (e: Exception) { null } ?: return@LaunchedEffect
         val executor = ContextCompat.getMainExecutor(context)
 
@@ -268,7 +270,8 @@ fun CameraPreviewView(
                         logicalCameraId = targetProfile.logicalCameraId,
                         physicalCameraId = targetProfile.physicalCameraId,
                         surfaceProvider = previewView.surfaceProvider,
-                        flashMode = flashMode
+                        flashMode = flashMode,
+                        extension = activeExtension
                     )
                 } else null
 

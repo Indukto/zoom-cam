@@ -7,6 +7,10 @@
         android:maxSdkVersion="28"
         tools:ignore="ScopedStorage" />
     <uses-feature android:name="android.hardware.camera" android:required="true" />
+    <!-- Advertise RAW + Camera2 support to Google Play without blocking install
+         on devices that lack these capabilities. -->
+    <uses-feature android:name="android.hardware.camera2.raw" android:required="false" />
+    <uses-feature android:name="android.hardware.camera2.full" android:required="false" />
 
     <application
         android:allowBackup="true"

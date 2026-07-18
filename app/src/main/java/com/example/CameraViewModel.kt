@@ -13,9 +13,12 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.zoom.CaptureExtension
 import com.example.zoom.FovMapper
 import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
+import com.example.zoom.PreviewSessionManager
+import com.example.zoom.RawCapture
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -94,6 +97,32 @@ class CameraViewModel : ViewModel() {
     private val _aspectRatio = MutableStateFlow("4:3")
     val aspectRatio: StateFlow<String> = _aspectRatio.asStateFlow()
 
+    // ── RAW capture mode ──────────────────────────────────────────────────
+    // When true, the shutter routes through RawCapture.captureDng() instead of
+    // the JPEG ImageCapture path. Capability-checked per lens via the catalog:
+    // RAW is only offered when the currently-selected lens advertises RAW_SENSOR.
+
+    private val _rawModeEnabled = MutableStateFlow(false)
+    val rawModeEnabled: StateFlow<Boolean> = _rawModeEnabled.asStateFlow()
+
+    // True when the currently selected lens can actually emit RAW frames.
+    private val _rawAvailableForCurrentLens = MutableStateFlow(false)
+    val rawAvailableForCurrentLens: StateFlow<Boolean> = _rawAvailableForCurrentLens.asStateFlow()
+
+    // ── OEM extension mode (HDR / Night / Bokeh / Auto) ───────────────────
+    // NONE keeps the manual physical-lens routing. Any other value lets the
+    // OEM extension own sensor selection. Availability is device-specific and
+    // cached after the first probe.
+
+    private val _activeExtension = MutableStateFlow(CaptureExtension.NONE)
+    val activeExtension: StateFlow<CaptureExtension> = _activeExtension.asStateFlow()
+
+    private val _availableExtensions = MutableStateFlow<Set<CaptureExtension>>(setOf(CaptureExtension.NONE))
+    val availableExtensions: StateFlow<Set<CaptureExtension>> = _availableExtensions.asStateFlow()
+
+    private val _extensionsProbeDone = MutableStateFlow(false)
+    val extensionsProbeDone: StateFlow<Boolean> = _extensionsProbeDone.asStateFlow()
+
     private val shutterSound = MediaActionSound()
 
     init {
@@ -124,6 +153,7 @@ class CameraViewModel : ViewModel() {
     fun setLensCatalogResult(result: LensCatalog.CatalogResult) {
         lensCatalogResult = result
         recalculateState()
+        refreshRawAvailabilityForCurrentLens()
     }
 
     fun setZoom(ratio: Float) {
@@ -147,6 +177,12 @@ class CameraViewModel : ViewModel() {
         _lensSwitchTrigger.value = _lensSwitchTrigger.value + 1
         _digitalZoomRatio.value = 1.0f
         recalculateState()
+        refreshRawAvailabilityForCurrentLens()
+        // Switching lens invalidates the per-lens extension availability; reset
+        // the probe so the UI re-queries against the new logical camera.
+        _extensionsProbeDone.value = false
+        _availableExtensions.value = setOf(CaptureExtension.NONE)
+        _activeExtension.value = CaptureExtension.NONE
     }
 
     private fun recalculateState() {
@@ -205,8 +241,160 @@ class CameraViewModel : ViewModel() {
         _showExposureSlider.value = false
     }
 
+    // ── RAW / Extension toggles ───────────────────────────────────────────
+
+    /**
+     * Toggle RAW capture mode. Refuses to enable RAW when the current lens
+     * doesn't support it (the caller can also check [rawAvailableForCurrentLens]
+     * to grey out the control).
+     */
+    fun toggleRawMode() {
+        if (!_rawModeEnabled.value && !_rawAvailableForCurrentLens.value) return
+        _rawModeEnabled.value = !_rawModeEnabled.value
+        // RAW bypasses OEM extensions by design (extensions produce processed
+        // JPEGs); force NONE while RAW is on so the two don't conflict.
+        if (_rawModeEnabled.value) _activeExtension.value = CaptureExtension.NONE
+    }
+
+    fun setRawModeEnabled(enabled: Boolean) {
+        if (enabled && !_rawAvailableForCurrentLens.value) return
+        _rawModeEnabled.value = enabled
+        if (enabled) _activeExtension.value = CaptureExtension.NONE
+    }
+
+    /**
+     * Select an OEM extension mode. Falls back to NONE if the mode isn't in
+     * [availableExtensions] (probed at runtime).
+     */
+    fun setExtension(ext: CaptureExtension) {
+        if (ext != CaptureExtension.NONE && ext !in _availableExtensions.value) return
+        _activeExtension.value = ext
+        // Extensions produce processed output, so RAW is mutually exclusive.
+        if (ext != CaptureExtension.NONE) _rawModeEnabled.value = false
+    }
+
+    fun cycleExtension() {
+        val available = CaptureExtension.userSelectable.filter { it in _availableExtensions.value }
+        if (available.size <= 1) return
+        val idx = available.indexOf(_activeExtension.value)
+        _activeExtension.value = available[(idx + 1).mod(available.size)]
+        if (_activeExtension.value != CaptureExtension.NONE) _rawModeEnabled.value = false
+    }
+
+    /**
+     * Refreshes the RAW availability flag based on the currently selected
+     * lens. Called whenever the lens role changes or the catalog is refreshed.
+     */
+    fun refreshRawAvailabilityForCurrentLens() {
+        val catalog = lensCatalogResult ?: return
+        val currentLens = when (_selectedLensRole.value) {
+            LensRole.ULTRA_WIDE -> catalog.ultraWide
+            LensRole.PRIMARY -> catalog.primary
+            LensRole.TELE -> catalog.tele
+        }
+        val supported = currentLens?.supportsRaw == true
+        _rawAvailableForCurrentLens.value = supported
+        // Auto-disable RAW if the user switches to a lens that can't do it.
+        if (!supported && _rawModeEnabled.value) _rawModeEnabled.value = false
+    }
+
+    /**
+     * Probes which OEM extensions the device advertises for the given camera.
+     * Result is cached in [availableExtensions] and surfaced via [extensionsProbeDone]
+     * so the UI can stop showing the loading affordance.
+     */
+    fun probeExtensions(
+        context: Context,
+        cameraProvider: androidx.camera.lifecycle.ProcessCameraProvider,
+        logicalCameraId: String,
+        isFrontCamera: Boolean,
+        lifecycleOwner: androidx.lifecycle.LifecycleOwner
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val manager = PreviewSessionManager(context, lifecycleOwner)
+                val available = manager.availableExtensions(cameraProvider, logicalCameraId, isFrontCamera)
+                _availableExtensions.value = available
+                if (_activeExtension.value !in available) _activeExtension.value = CaptureExtension.NONE
+            } catch (e: Exception) {
+                Log.e("CameraViewModel", "probeExtensions failed", e)
+                _availableExtensions.value = setOf(CaptureExtension.NONE)
+            } finally {
+                _extensionsProbeDone.value = true
+            }
+        }
+    }
+
     fun playShutterSound() {
         try { shutterSound.play(MediaActionSound.SHUTTER_CLICK) } catch (e: Exception) { Log.e("CameraViewModel", "Error playing shutter sound", e) }
+    }
+
+    /**
+     * RAW capture entry point. Routes the shutter through [RawCapture.captureDng]
+     * and inserts the resulting .dng into the gallery as image/x-adobe-dng.
+     * Skips the JPEG post-processing pipeline (no retro filter / crop).
+     */
+    fun captureAndSaveRaw(
+        context: Context,
+        logicalCameraId: String,
+        physicalCameraId: String,
+        focalLengthMm: Int
+    ) {
+        _isCapturing.value = true
+        RawCapture.captureDng(
+            context = context,
+            logicalCameraId = logicalCameraId,
+            physicalCameraId = physicalCameraId,
+            focalLengthMm = focalLengthMm,
+            flashMode = _flashMode.value,
+            onCaptured = { dngFile ->
+                saveDngToGallery(context, dngFile)
+                loadPhotos(context)
+                _isCapturing.value = false
+            },
+            onError = { e ->
+                Log.e("CameraViewModel", "RAW capture failed", e)
+                _isCapturing.value = false
+            }
+        )
+    }
+
+    /**
+     * Inserts a .dng into MediaStore under Pictures/ZoomBoxCamera/RAW. RAW files
+     * are kept separate from JPEGs both by extension and by subfolder so the
+     * retro-roll filmstrip (which decodes JPEGs) isn't polluted.
+     */
+    private fun saveDngToGallery(context: Context, file: File) {
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, file.name)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/ZoomBoxCamera/RAW")
+                } else {
+                    @Suppress("DEPRECATION")
+                    put(MediaStore.Images.Media.DATA, file.absolutePath)
+                }
+            }
+            val resolver = context.contentResolver
+            val contentUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+            val uri = resolver.insert(contentUri, values) ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { `in` -> `in`.copyTo(out) }
+                }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+        } catch (e: Exception) {
+            Log.e("CameraViewModel", "Error saving DNG to gallery", e)
+        }
     }
 
     fun processAndSavePhoto(

@@ -19,6 +19,9 @@ enum class LensRole {
  * @property nativeMegapixels The full-resolution megapixel count of the sensor
  * @property maxApertureF The maximum aperture (e.g. 1.85, 2.2, 3.5)
  * @property hasOIS Whether this lens has optical image stabilisation
+ * @property supportsRaw Whether this lens can capture RAW (RAW_SENSOR). Generally
+ *           true on the main rear sensors of flagship devices; rarely on front
+ *           or ultra-wide/tele. Used to gate the "RAW" capture mode per lens.
  */
 data class LensProfile(
     val role: LensRole,
@@ -27,5 +30,6 @@ data class LensProfile(
     val equivFocalMm: Float,
     val nativeMegapixels: Int,
     val maxApertureF: Float,
-    val hasOIS: Boolean
+    val hasOIS: Boolean,
+    val supportsRaw: Boolean = false
 )

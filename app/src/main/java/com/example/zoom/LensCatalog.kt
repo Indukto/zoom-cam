@@ -90,6 +90,7 @@ class LensCatalog(private val context: Context) {
 
                     val hasOIS = hasOpticalStabilization(lensChars)
                     val maxAperture = estimateMaxAperture(lensChars)
+                    val supportsRaw = supportsRawCapture(lensChars)
 
                     val role = classifyLens(equivFocalMm)
 
@@ -101,7 +102,8 @@ class LensCatalog(private val context: Context) {
                             equivFocalMm = equivFocalMm,
                             nativeMegapixels = megapixels,
                             maxApertureF = maxAperture,
-                            hasOIS = hasOIS
+                            hasOIS = hasOIS,
+                            supportsRaw = supportsRaw
                         )
                     )
                 }
@@ -189,6 +191,32 @@ class LensCatalog(private val context: Context) {
     private fun estimateMaxAperture(characteristics: CameraCharacteristics): Float {
         val apertures = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
         return apertures?.minOrNull() ?: 2.0f
+    }
+
+    /**
+     * Reports whether this sensor can capture RAW bayer data.
+     *
+     * Requires both the `REQUEST_AVAILABLE_CAPABILITIES_RAW` capability and a
+     * non-empty set of `RAW_SENSOR` output sizes on the stream config map.
+     * Front cameras and many ultra-wide/tele sensors do NOT advertise this,
+     * so the result drives whether the app offers a "RAW" toggle for the lens.
+     */
+    private fun supportsRawCapture(characteristics: CameraCharacteristics): Boolean {
+        return try {
+            val capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+                ?: return false
+            val hasRawCapability = capabilities.any {
+                it == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW
+            }
+            if (!hasRawCapability) return false
+            val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?: return false
+            val rawSizes = configMap.getOutputSizes(android.graphics.ImageFormat.RAW_SENSOR)
+            !rawSizes.isNullOrEmpty()
+        } catch (e: Exception) {
+            Log.w(TAG, "supportsRawCapture probe failed", e)
+            false
+        }
     }
 
     /**

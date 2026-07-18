@@ -116,6 +116,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
+import com.example.zoom.CaptureExtension
 import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -746,8 +747,31 @@ fun CameraActiveScreen(
     val showExpSlider by viewModel.showExposureSlider.collectAsState()
     val isCapturing by viewModel.isCapturing.collectAsState()
 
+    val rawModeEnabled by viewModel.rawModeEnabled.collectAsState()
+    val rawAvailableForCurrentLens by viewModel.rawAvailableForCurrentLens.collectAsState()
+    val activeExtension by viewModel.activeExtension.collectAsState()
+    val availableExtensions by viewModel.availableExtensions.collectAsState()
+    val extensionsProbeDone by viewModel.extensionsProbeDone.collectAsState()
+
     val mainExecutor = ContextCompat.getMainExecutor(context)
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+
+    // Probe OEM extension availability whenever the lens switches (or on first
+    // entry). Extensions are per-logical-camera, so re-query on every rebinding.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(selectedLensRole, isFrontCamera) {
+        if (isFrontCamera) return@LaunchedEffect
+        // Resolve the logical camera id for the selected lens, then probe.
+        val catalog = LensCatalog(context).enumerate()
+        val targetProfile = when (selectedLensRole) {
+            LensRole.ULTRA_WIDE -> catalog.ultraWide
+            LensRole.PRIMARY -> catalog.primary
+            LensRole.TELE -> catalog.tele
+        } ?: return@LaunchedEffect
+        val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(context)
+        val provider = try { providerFuture.get() } catch (e: Exception) { return@LaunchedEffect }
+        viewModel.probeExtensions(context, provider, targetProfile.logicalCameraId, false, lifecycleOwner)
+    }
 
     var flashFlashActive by remember { mutableStateOf(false) }
     LaunchedEffect(flashFlashActive) {
@@ -795,6 +819,7 @@ fun CameraActiveScreen(
             exposure = exposure,
             flashMode = flashMode,
             isFrontCamera = isFrontCamera,
+            activeExtension = activeExtension,
             onZoomChanged = { viewModel.setZoom(it) },
             onZoomTick = {
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -978,6 +1003,84 @@ fun CameraActiveScreen(
                         )
                     }
                 }
+
+                // RAW + Extension mode strip
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // RAW toggle
+                    val rawEnabled = rawAvailableForCurrentLens && !isFrontCamera
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                when {
+                                    rawModeEnabled -> Color(0xFFF59E0B)
+                                    rawEnabled -> Color(0xFF2C2C2E)
+                                    else -> Color(0xFF1C1C1E)
+                                }
+                            )
+                            .then(
+                                if (rawEnabled) Modifier.clickable {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    viewModel.toggleRawMode()
+                                } else Modifier
+                            )
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "RAW",
+                            color = if (rawModeEnabled) Color.Black else
+                                if (rawEnabled) Color.White.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.25f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.5.sp,
+                            fontFamily = FontFamily.Serif
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Extension mode cycle button
+                    if (!isFrontCamera && extensionsProbeDone && availableExtensions.size > 1) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    if (activeExtension != CaptureExtension.NONE) Color(0xFF2C2C2E)
+                                    else Color(0xFF1C1C1E)
+                                )
+                                .clickable {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    viewModel.cycleExtension()
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = when (activeExtension) {
+                                    CaptureExtension.NONE -> "STD"
+                                    CaptureExtension.HDR -> "HDR"
+                                    CaptureExtension.NIGHT -> "NIGHT"
+                                    CaptureExtension.BOKEH -> "BOKEH"
+                                    CaptureExtension.FACE_RETOUCH -> "RETOUCH"
+                                    CaptureExtension.AUTO -> "AUTO"
+                                },
+                                color = if (activeExtension != CaptureExtension.NONE) Color(0xFFF59E0B)
+                                else Color.White.copy(alpha = 0.5f),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.5.sp,
+                                fontFamily = FontFamily.Serif
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -1046,36 +1149,53 @@ fun CameraActiveScreen(
                         .padding(4.dp)
                         .testTag("shutter_button")
                         .clickable(enabled = !isCapturing) {
-                            val captureDevice = activeImageCapture
-                            if (captureDevice != null) {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                viewModel.playShutterSound()
-                                flashFlashActive = true
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.playShutterSound()
+                            flashFlashActive = true
 
-                                val catalog = LensCatalog(context)
-                                val result = catalog.enumerate()
-                                val isDigitalZoomActive = selectedLensRole == LensRole.PRIMARY
-                                val nativeFocalForCrop = if (isDigitalZoomActive) result.primary?.equivFocalMm else null
+                            val catalog = LensCatalog(context)
+                            val result = catalog.enumerate()
+                            val currentLens = when (selectedLensRole) {
+                                LensRole.ULTRA_WIDE -> result.ultraWide
+                                LensRole.PRIMARY -> result.primary
+                                LensRole.TELE -> result.tele
+                            }
 
-                                triggerImageCapture(
+                            if (rawModeEnabled && currentLens != null) {
+                                // ── RAW/DNG path ───────────────────────────
+                                viewModel.captureAndSaveRaw(
                                     context = context,
-                                    imageCapture = captureDevice,
-                                    executor = mainExecutor,
-                                    onCaptured = { rawFile ->
-                                        viewModel.processAndSavePhoto(
-                                            context = context,
-                                            rawFile = rawFile,
-                                            boxWidthFraction = animatedBoxWidthFraction,
-                                            screenWidth = totalWidth.value,
-                                            screenHeight = totalHeight.value,
-                                            captureFocalLength = effectiveFocalLength,
-                                            captureLensNativeFocalMm = nativeFocalForCrop
-                                        )
-                                    },
-                                    onCaptureError = { exc ->
-                                        Log.e("CameraActiveScreen", "Capture failed", exc)
-                                    }
+                                    logicalCameraId = currentLens.logicalCameraId,
+                                    physicalCameraId = currentLens.physicalCameraId,
+                                    focalLengthMm = effectiveFocalLength
                                 )
+                            } else {
+                                // ── JPEG path (existing) ───────────────────
+                                val captureDevice = activeImageCapture
+                                if (captureDevice != null) {
+                                    val isDigitalZoomActive = selectedLensRole == LensRole.PRIMARY
+                                    val nativeFocalForCrop = if (isDigitalZoomActive) result.primary?.equivFocalMm else null
+
+                                    triggerImageCapture(
+                                        context = context,
+                                        imageCapture = captureDevice,
+                                        executor = mainExecutor,
+                                        onCaptured = { rawFile ->
+                                            viewModel.processAndSavePhoto(
+                                                context = context,
+                                                rawFile = rawFile,
+                                                boxWidthFraction = animatedBoxWidthFraction,
+                                                screenWidth = totalWidth.value,
+                                                screenHeight = totalHeight.value,
+                                                captureFocalLength = effectiveFocalLength,
+                                                captureLensNativeFocalMm = nativeFocalForCrop
+                                            )
+                                        },
+                                        onCaptureError = { exc ->
+                                            Log.e("CameraActiveScreen", "Capture failed", exc)
+                                        }
+                                    )
+                                }
                             }
                         },
                     contentAlignment = Alignment.Center
