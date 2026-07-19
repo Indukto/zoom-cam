@@ -12,7 +12,10 @@ import kotlinx.coroutines.launch
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.core.content.ContextCompat
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.EaseInOutCubic
@@ -126,6 +129,7 @@ import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -141,6 +145,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
+import androidx.compose.ui.graphics.vector.ImageVector
 import com.example.zoom.AspectRatio
 import com.example.zoom.CaptureExtension
 import com.example.zoom.LensCatalog
@@ -205,7 +210,9 @@ private fun SpectrumSlider(
     centerTick: String,
     rightTick: String,
     modifier: Modifier = Modifier,
-    step: Float? = null   // when non-null, the value snaps to multiples of `step`
+    step: Float? = null,   // when non-null, the value snaps to multiples of `step`
+    trackHeight: Dp = 30.dp,
+    doubleTapToReset: Boolean = true
 ) {
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
@@ -253,7 +260,7 @@ private fun SpectrumSlider(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(30.dp)
+                .height(trackHeight)
                 .onGloballyPositioned { trackWidthPx = it.size.width.toFloat() }
         ) {
             // Gradient bar
@@ -298,10 +305,12 @@ private fun SpectrumSlider(
                                 onValueChange(pxToValue(offset.x))
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             },
-                            onDoubleTap = {
-                                onValueChange(snap(0f))
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            }
+                            onDoubleTap = if (doubleTapToReset) {
+                                {
+                                    onValueChange(snap(0f))
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            } else null
                         )
                     }
                     .draggable(
@@ -527,7 +536,8 @@ private fun ColorPlot(
 private fun WhiteBalancePanel(
     temperature: Float,
     tint: Float,
-    onValueChange: (Float, Float) -> Unit
+    onValueChange: (Float, Float) -> Unit,
+    headerActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {}
 ) {
     val kValue = tempToKelvin(temperature)
     val tintInt = (tint * 10).toInt()
@@ -545,6 +555,7 @@ private fun WhiteBalancePanel(
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
+            headerActions()
         }
         Spacer(modifier = Modifier.height(8.dp))
         Row(
@@ -629,7 +640,8 @@ private fun WhiteBalancePanel(
 @Composable
 private fun ExposurePanel(
     exposure: Float,
-    onValueChange: (Float) -> Unit
+    onValueChange: (Float) -> Unit,
+    headerActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {}
 ) {
     val evLabel = if (exposure >= 0) "+${String.format("%.1f", exposure)}" else String.format("%.1f", exposure)
 
@@ -646,38 +658,166 @@ private fun ExposurePanel(
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
-            Text(
-                text = "$evLabel EV",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Serif
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "$evLabel EV",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Serif
+                )
+                headerActions()
+            }
         }
         Spacer(modifier = Modifier.height(10.dp))
         SpectrumSlider(
             value = exposure,
             onValueChange = onValueChange,
             valueRange = -3f..3f,
-            gradient = listOf(
-                Color(0xFF000000),  // black (underexposed)
-                Color(0xFF3F3F46),  // dark gray
-                Color(0xFFA1A1AA),  // mid gray
-                Color(0xFFE5E7EB),  // bright
-                Color(0xFFFBBF24)   // warm highlight
-            ),
+            gradient = listOf(Color(0xFF52525B), Color(0xFF52525B)),
             valueLabel = "${evLabel}EV",
             leftTick = "-3",
             centerTick = "0",
             rightTick = "+3",
-            step = 0.1f   // snap to 1/10 EV stops like a typical camera
+            step = 0.1f,   // snap to 1/10 EV stops like a typical camera
+            trackHeight = 18.dp,
+            doubleTapToReset = false
         )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "double-tap to reset",
-            color = Color.White.copy(alpha = 0.35f),
-            fontSize = 8.sp
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Floating control surface (Morph)
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Three discrete visual modes the floating control surface can occupy.
+ * [BUBBLE] is the compact 3-button row (temperature + lens + exposure).
+ * [COLOR] / [EXPOSURE] replace it with the expanded settings panel; both
+ * anchored at the same bottom edge so the bubble doesn't get shoved
+ * downward when the panel opens.
+ */
+private enum class MorphMode { BUBBLE, COLOR, EXPOSURE }
+
+/**
+ * Shared chrome (background fill + faint border + padded 300 dp slot)
+ * wrapped around both expanded panels. Keeping both panels inside the
+ * same wrapper makes their visual weight match exactly so the morph
+ * between them stays symmetric.
+ */
+@Composable
+private fun MorphedPanelChrome(content: @Composable () -> Unit) {
+    Box(
+        modifier = Modifier
+            .background(Color(0xF21E1E1E), RoundedCornerShape(18.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+            .width(300.dp)
+    ) {
+        content()
+    }
+}
+
+/**
+ * Compact icon button shown in a panel's title row. Smaller than the
+ * bubble's tap targets so the title stays legible when two of these sit
+ * next to the EV readout in the ExposurePanel header.
+ */
+@Composable
+private fun MorphedPanelHeaderButton(
+    icon: ImageVector,
+    description: String,
+    onClick: () -> Unit
+) {
+    IconButton(onClick = onClick, modifier = Modifier.size(24.dp)) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = Color.White.copy(alpha = 0.75f),
+            modifier = Modifier.size(14.dp)
         )
+    }
+}
+
+/**
+ * The compact 3-button bubble row. Identical visual to the inline row that
+ * lived at the bottom of the viewfinder before the morph refactor; extracted
+ * so it can be swapped in/out of the same composable slot as the expanded
+ * settings panels.
+ */
+@Composable
+private fun FloatingBubbleRow(
+    effectiveFocalLength: Int,
+    temperature: Float,
+    tint: Float,
+    exposure: Float,
+    onTemperatureClick: () -> Unit,
+    onLensClick: () -> Unit,
+    onExposureClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(22.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        IconButton(
+            onClick = onTemperatureClick,
+            modifier = Modifier.size(44.dp).testTag("bubble_temperature_button")
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Thermostat,
+                contentDescription = "Temperature",
+                tint = if (temperature != 0f || tint != 0f) Color(0xFFFBBF24) else Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        Box(
+            modifier = Modifier
+                .height(40.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.White.copy(alpha = 0.15f))
+                .clickable { onLensClick() }
+                .padding(horizontal = 14.dp)
+                .testTag("bubble_lens_button"),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = effectiveFocalLength.toString(),
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .clickable { onExposureClick() }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .testTag("bubble_exposure_button"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.WbSunny,
+                contentDescription = "Exposure",
+                tint = if (exposure != 0f) Color(0xFFFBBF24) else Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+            Text(
+                text = exposure.toInt().toString(),
+                color = if (exposure != 0f) Color(0xFFFBBF24) else Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
     }
 }
 
@@ -1322,56 +1462,134 @@ fun CameraActiveScreen(
             }
         }
 
-        // Floating Control Capsule + Slider popup centered inside the bottom of the viewfinder.
-        // Single offset path: always 60 dp above the viewfinder bottom, full-width-centred.
+        // Floating Control Surface — the bubble and the color/exposure panels
+        // share the same composable slot at the bottom of the viewfinder and
+        // morph in place via AnimatedContent. Anchor the bottom edge of the
+        // rendered content to (vfTop + vfHeight - 10 dp) so the bubble stays
+        // put; the taller panel grows upward into the viewfinder rather than
+        // shoving the bubble down into the deck like the previous stacked
+        // layout did.
+        val morphBottomAnchorPx = with(LocalDensity.current) { (vfTop + vfHeight - 10.dp).roundToPx() }
         Box(
             modifier = Modifier
-                .offset(y = vfTop + vfHeight - 60.dp)
-                .fillMaxWidth(),
-            contentAlignment = Alignment.Center
+                // Anchor content at horizontal center + viewfinder bottom so the
+                // morph reads as the bubble staying put while the panel grows
+                // upward, instead of leaving the bubble stuck on the left edge of
+                // the screen. The previous layout block reported placeable.width as
+                // its own bounds and placed at x=0, which overrode any outer
+                // contentAlignment and visually pinned the bubble to the screen's
+                // left edge during the morph. We now return constraints.maxWidth
+                // (= boxWidth from BoxWithConstraints) and place the placeable at
+                // the layout's horizontal center.
+                .layout { measurable, constraints ->
+                    val placeable = measurable.measure(constraints)
+                    layout(constraints.maxWidth, placeable.height) {
+                        val centerX = (constraints.maxWidth - placeable.width) / 2
+                        placeable.place(
+                            x = centerX,
+                            y = morphBottomAnchorPx - placeable.height
+                        )
+                    }
+                },
+            contentAlignment = Alignment.BottomCenter
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                AnimatedVisibility(
-                    visible = showTempSlider || showExpSlider,
-                    enter = fadeIn() + slideInVertically(initialOffsetY = { 20 }),
-                    exit = fadeOut() + slideOutVertically(targetOffsetY = { 20 })
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .padding(bottom = 12.dp)
-                            .background(Color(0xF21E1E1E), RoundedCornerShape(18.dp))
-                            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
-                            .padding(horizontal = 18.dp, vertical = 14.dp)
-                            .width(300.dp)
-                    ) {
-                        if (showTempSlider) {
-                            WhiteBalancePanel(temperature = temperature, tint = tint, onValueChange = { tempVal, tintVal ->
-                                viewModel.setTemperature(tempVal); viewModel.setTint(tintVal)
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            })
-                        } else if (showExpSlider) {
-                            ExposurePanel(exposure = exposure, onValueChange = { viewModel.setExposure(it); haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) })
+            val morphMode: MorphMode = when {
+                showTempSlider -> MorphMode.COLOR
+                showExpSlider  -> MorphMode.EXPOSURE
+                else           -> MorphMode.BUBBLE
+            }
+            AnimatedContent(
+                targetState = morphMode,
+                // Drop fillMaxWidth so SizeTransform can actually interpolate
+                // the slot's width during the morph. With fillMaxWidth on both
+                // states, the slot was already screen-wide on both sides and the
+                // size animation had nothing to interpolate — the morph just
+                // snapped. With wrap-content here the slot grows from bubble width
+                // (~180 dp) to panel width (300 dp) and the size animation reads.
+                contentAlignment = Alignment.BottomCenter,
+                transitionSpec = {
+                    // Sharing one tween curve across both fades AND the
+                    // SizeTransform keeps alpha and the bounds grow in lock-step.
+                    // Otherwise the alpha finishes while the size is still mid-way
+                    // and the transition reads as a lurch. EaseInOutCubic matches
+                    // the curve already used for the staggered splash reveals.
+                    val morphDuration = 260
+                    val morphEasing = EaseInOutCubic
+                    ContentTransform(
+                        targetContentEnter = fadeIn(
+                            tween(morphDuration, easing = morphEasing)
+                        ),
+                        initialContentExit = fadeOut(
+                            tween(morphDuration, easing = morphEasing)
+                        ),
+                        sizeTransform = SizeTransform(
+                            clip = false,
+                            sizeAnimationSpec = { _, _ ->
+                                tween<IntSize>(morphDuration, easing = morphEasing)
+                            }
+                        )
+                    )
+                },
+                label = "bubble_panel_morph"
+            ) { mode ->
+                when (mode) {
+                    MorphMode.BUBBLE -> FloatingBubbleRow(
+                        effectiveFocalLength = effectiveFocalLength,
+                        temperature = temperature,
+                        tint = tint,
+                        exposure = exposure,
+                        onTemperatureClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.toggleTemperatureSlider()
+                        },
+                        onLensClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.cycleLens()
+                        },
+                        onExposureClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            viewModel.toggleExposureSlider()
                         }
+                    )
+                    MorphMode.COLOR -> MorphedPanelChrome {
+                        WhiteBalancePanel(
+                            temperature = temperature,
+                            tint = tint,
+                            onValueChange = { tempVal, tintVal ->
+                                viewModel.setTemperature(tempVal)
+                                viewModel.setTint(tintVal)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            },
+                            headerActions = {
+                                MorphedPanelHeaderButton(
+                                    icon = Icons.Rounded.Close,
+                                    description = "Close",
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        viewModel.closeSliders()
+                                    }
+                                )
+                            }
+                        )
                     }
-                }
-
-                Row(
-                    modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(22.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleTemperatureSlider() }, modifier = Modifier.size(44.dp)) {
-                        Icon(imageVector = Icons.Rounded.Thermostat, contentDescription = "Temperature", tint = if (temperature != 0f || tint != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(22.dp))
-                    }
-                    Box(modifier = Modifier.height(40.dp).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.15f)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cycleLens() }.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
-                        Text(text = "${effectiveFocalLength.toInt()}", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                    }
-                    Row(modifier = Modifier.clip(RoundedCornerShape(14.dp)).clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.toggleExposureSlider() }.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(imageVector = Icons.Rounded.WbSunny, contentDescription = "Exposure", tint = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, modifier = Modifier.size(20.dp))
-                        Text(text = "${exposure.toInt()}", color = if (exposure != 0f) Color(0xFFFBBF24) else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    MorphMode.EXPOSURE -> MorphedPanelChrome {
+                        ExposurePanel(
+                            exposure = exposure,
+                            onValueChange = { value ->
+                                viewModel.setExposure(value)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            },
+                            headerActions = {
+                                MorphedPanelHeaderButton(
+                                    icon = Icons.Rounded.Close,
+                                    description = "Close",
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        viewModel.closeSliders()
+                                    }
+                                )
+                            }
+                        )
                     }
                 }
             }
