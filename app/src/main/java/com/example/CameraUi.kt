@@ -757,6 +757,7 @@ private fun FloatingBubbleRow(
     temperature: Float,
     tint: Float,
     exposure: Float,
+    isFrontCamera: Boolean = false,
     onTemperatureClick: () -> Unit,
     onLensClick: () -> Unit,
     onExposureClick: () -> Unit
@@ -784,19 +785,39 @@ private fun FloatingBubbleRow(
             modifier = Modifier
                 .height(40.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(Color.White.copy(alpha = 0.15f))
-                .clickable { onLensClick() }
+                .background(
+                    if (isFrontCamera) Color.White.copy(alpha = 0.06f)
+                    else Color.White.copy(alpha = 0.15f)
+                )
+                .clickable(enabled = !isFrontCamera) { onLensClick() }
                 .padding(horizontal = 14.dp)
                 .testTag("bubble_lens_button"),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = effectiveFocalLength.toString(),
-                color = Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
+            if (isFrontCamera) {
+                // Selfie camera has only one lens — show a fixed indicator
+                // instead of one of the back-camera focal lengths. If we
+                // left `effectiveFocalLength.toString()` here the user
+                // would still see the 13/24/116 cycle when tapping a stale
+                // recomposition path. cycleLens() also short-circuits
+                // when isFrontCamera so the click is a no-op either way.
+                Text(
+                    text = "FRONT",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    letterSpacing = 1.sp
+                )
+            } else {
+                Text(
+                    text = effectiveFocalLength.toString(),
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
         Row(
             modifier = Modifier
@@ -1541,13 +1562,21 @@ fun CameraActiveScreen(
                         temperature = temperature,
                         tint = tint,
                         exposure = exposure,
+                        isFrontCamera = isFrontCamera,
                         onTemperatureClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             viewModel.toggleTemperatureSlider()
                         },
                         onLensClick = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            viewModel.cycleLens()
+                            // Skip both the haptic and the cycle on front
+                            // camera. cycleLens() already no-ops internally
+                            // (defense-in-depth) but folding both intent and
+                            // feedback into the same guard suppresses the
+                            // "buzz-and-nothing" feel on the dead click.
+                            if (!isFrontCamera) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                viewModel.cycleLens()
+                            }
                         },
                         onExposureClick = {
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)

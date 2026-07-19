@@ -270,6 +270,13 @@ class CameraViewModel : ViewModel() {
      * The preview binding in CameraPreviewView will fallback gracefully if a lens isn't found.
      */
     fun cycleLens() {
+        // Front camera has only one lens — there is nothing to cycle to.
+        // Bump out before the state machine runs so the BubbleRow in
+        // CameraUi doesn't flicker through 13/24/116 mm while the user is
+        // on selfie mode. The UI also gates the click, but guarding here
+        // is defense-in-depth in case a future screen subscribes
+        // directly to _selectedLensRole.
+        if (_isFrontCamera.value) return
         val nextRole = when (_selectedLensRole.value) {
             LensRole.PRIMARY -> LensRole.ULTRA_WIDE
             LensRole.ULTRA_WIDE -> LensRole.TELE
@@ -288,6 +295,11 @@ class CameraViewModel : ViewModel() {
     }
 
     private fun recalculateState() {
+        // Front camera is single-lens; back-camera focal / box-scale / role
+        // state is meaningless there. Short-circuit prevents an earlier
+        // rear-camera zoom from leaking into the front preview as the
+        // zoom-box overlay + "24mm" label at line ~1421 of CameraUi.kt.
+        if (_isFrontCamera.value) return
         val catalog = lensCatalogResult
         val primaryFocalMm = catalog?.primary?.equivFocalMm ?: 24f
         val ultraWideFocalMm = catalog?.ultraWide?.equivFocalMm ?: 13.4f
@@ -330,7 +342,22 @@ class CameraViewModel : ViewModel() {
         setExposure(preset.exposureOffset)
     }
     fun toggleFlash() { _flashMode.value = (_flashMode.value + 1) % 3 }
-    fun toggleCamera() { _isFrontCamera.value = !_isFrontCamera.value }
+    fun toggleCamera() {
+        val nowFront = !_isFrontCamera.value
+        _isFrontCamera.value = nowFront
+        if (nowFront) {
+            // The front camera is single-lens. Reset zoom-related state so
+            // a back-camera zoom (boxScale < 0.99) doesn't carry into the
+            // selfie preview as a stale zoom-box overlay. _selectedLensRole
+            // is left alone — the user typically flips back-and-forth and
+            // we want them to land where they were last on the rear side.
+            _digitalZoomRatio.value = 1.0f
+            _boxScale.value = 1f
+        }
+        // Always re-run recalculateState: short-circuits on front (so the
+        // reset values above stick), recomputes on rear transition.
+        recalculateState()
+    }
     fun toggleGridLines() { _showGridLines.value = !_showGridLines.value }
     fun cycleSelfTimer() {
         _selfTimerMode.value = when (_selfTimerMode.value) { 0 -> 3; 3 -> 10; else -> 0 }

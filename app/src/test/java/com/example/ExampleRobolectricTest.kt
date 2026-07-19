@@ -98,4 +98,18 @@ class ExampleRobolectricTest {
     // State should now be updated (Aspect ratio is 1:1)
     assertEquals(AspectRatio.RATIO_1_1, viewModel.aspectRatio.value)
   }
+
+  @Test
+  fun test_viewmodel_cycle_lens_is_noop_on_front_camera() {
+    // Front camera has only one lens; cycling the bubble should not change
+    // _selectedLensRole. Locks in the front-camera guard so a future
+    // refactor can't silently re-introduce the "13/24/116 cycle on selfie
+    // mode" bug.
+    val viewModel = CameraViewModel()
+    viewModel.toggleCamera()
+    assertTrue(viewModel.isFrontCamera.value)
+    val before = viewModel.selectedLensRole.value
+    viewModel.cycleLens()
+    assertEquals(before, viewModel.selectedLensRole.value)
+  }
 }
