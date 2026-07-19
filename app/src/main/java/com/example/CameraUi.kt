@@ -108,7 +108,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -1202,7 +1201,6 @@ fun CameraActiveScreen(
     val boxScale by viewModel.boxScale.collectAsState()
     val previewLensRole by viewModel.previewLensRole.collectAsState()
     val captureLensRole by viewModel.captureLensRole.collectAsState()
-    val lensSwitchTrigger by viewModel.lensSwitchTrigger.collectAsState()
     val showGridLines by viewModel.showGridLines.collectAsState()
     val aspectRatio by viewModel.aspectRatio.collectAsState()
 
@@ -1310,7 +1308,6 @@ fun CameraActiveScreen(
                 .height(vfHeight)
                 .clip(RoundedCornerShape(16.dp))
         ) {
-        key(lensSwitchTrigger) {
         CameraPreviewView(
             modifier = Modifier.fillMaxSize(),
             selectedLensRole = selectedLensRole,
@@ -1329,7 +1326,6 @@ fun CameraActiveScreen(
             imageCaptureProvider = { activeImageCapture = it },
             onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
-        }
 
         // Color overlay for retro temperature tint
         if (temperature != 0f) {
