@@ -1451,7 +1451,7 @@ fun CameraActiveScreen(
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     onOpenSettings()
                 },
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(36.dp).testTag("settings_menu_button")
             ) {
                 Icon(
                     imageVector = Icons.Rounded.MoreVert,
@@ -2125,7 +2125,7 @@ fun PhotoViewerOverlay(
 // the active surface to this SettingsScreen. Back arrow + system back both return to
 // the live camera via onClose().
 @Composable
-private fun SettingsScreen(viewModel: CameraViewModel, onClose: () -> Unit) {
+fun SettingsScreen(viewModel: CameraViewModel, onClose: () -> Unit) {
     val haptic = LocalHapticFeedback.current
     val rawModeEnabled by viewModel.rawModeEnabled.collectAsState()
     val rawAvailableForCurrentLens by viewModel.rawAvailableForCurrentLens.collectAsState()
@@ -2343,6 +2343,7 @@ private fun AspectRatioChips(
                     .weight(1f)
                     .height(58.dp)
                     .clip(RoundedCornerShape(10.dp))
+                    .testTag("aspect_ratio_chip_${ratio.label}")
                     .border(
                         width = 1.dp,
                         color = if (isSelected) Color(0xFFFBBF24) else Color.Transparent,
