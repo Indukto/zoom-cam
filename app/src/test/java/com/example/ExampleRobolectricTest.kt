@@ -1,6 +1,11 @@
 package com.example
 
 import android.content.Context
+import com.example.zoom.AspectRatio
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -32,7 +37,7 @@ class ExampleRobolectricTest {
   fun test_viewmodel_initial_states() {
     val viewModel = CameraViewModel()
     assertFalse(viewModel.showGridLines.value)
-    assertEquals("4:3", viewModel.aspectRatio.value)
+    assertEquals(AspectRatio.RATIO_4_3, viewModel.aspectRatio.value)
   }
 
   @Test
@@ -48,13 +53,11 @@ class ExampleRobolectricTest {
   @Test
   fun test_viewmodel_set_aspect_ratio() {
     val viewModel = CameraViewModel()
-    assertEquals("4:3", viewModel.aspectRatio.value)
-    viewModel.setAspectRatio("1:1")
-    assertEquals("1:1", viewModel.aspectRatio.value)
-    viewModel.setAspectRatio("invalid")
-    assertEquals("1:1", viewModel.aspectRatio.value) // Should ignore invalid value
-    viewModel.setAspectRatio("4:3")
-    assertEquals("4:3", viewModel.aspectRatio.value)
+    assertEquals(AspectRatio.RATIO_4_3, viewModel.aspectRatio.value)
+    viewModel.setAspectRatio(AspectRatio.RATIO_1_1)
+    assertEquals(AspectRatio.RATIO_1_1, viewModel.aspectRatio.value)
+    viewModel.setAspectRatio(AspectRatio.RATIO_4_3)
+    assertEquals(AspectRatio.RATIO_4_3, viewModel.aspectRatio.value)
   }
 
   @Test
@@ -62,35 +65,37 @@ class ExampleRobolectricTest {
     val viewModel = CameraViewModel()
 
     composeTestRule.setContent {
-      CameraActiveScreen(viewModel = viewModel)
+      var showSettings by remember { mutableStateOf(false) }
+      if (showSettings) {
+        SettingsScreen(viewModel = viewModel, onClose = { showSettings = false })
+      } else {
+        CameraActiveScreen(viewModel = viewModel, onOpenSettings = { showSettings = true })
+      }
     }
 
     // Verify initial state
     assertFalse(viewModel.showGridLines.value)
-    assertEquals("4:3", viewModel.aspectRatio.value)
+    assertEquals(AspectRatio.RATIO_4_3, viewModel.aspectRatio.value)
 
-    // Find and click the settings button to show the menu
-    val settingsBtn = composeTestRule.onNodeWithTag("settings_menu_button")
-    settingsBtn.assertExists()
-    settingsBtn.performClick()
-
-    // Find and click the grid lines item to toggle it
-    val gridLinesItem = composeTestRule.onNodeWithTag("menu_item_grid_lines")
+    // Find and click the grid lines item to toggle it (on main screen)
+    val gridLinesItem = composeTestRule.onNodeWithTag("grid_overlay_button")
     gridLinesItem.assertExists()
     gridLinesItem.performClick()
 
     // State should now be updated (Grid lines enabled)
     assertTrue(viewModel.showGridLines.value)
 
-    // Open settings menu again
+    // Find and click the settings button to show the menu
+    val settingsBtn = composeTestRule.onNodeWithTag("settings_menu_button")
+    settingsBtn.assertExists()
     settingsBtn.performClick()
 
-    // Find and click the aspect ratio item to toggle it to 1:1
-    val aspectRatioItem = composeTestRule.onNodeWithTag("menu_item_aspect_ratio")
+    // Find and click the aspect ratio item to toggle it to 1:1 (in settings)
+    val aspectRatioItem = composeTestRule.onNodeWithTag("aspect_ratio_chip_1:1")
     aspectRatioItem.assertExists()
     aspectRatioItem.performClick()
 
     // State should now be updated (Aspect ratio is 1:1)
-    assertEquals("1:1", viewModel.aspectRatio.value)
+    assertEquals(AspectRatio.RATIO_1_1, viewModel.aspectRatio.value)
   }
 }

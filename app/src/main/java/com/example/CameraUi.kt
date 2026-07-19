@@ -86,6 +86,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.layout.onSizeChanged
@@ -1608,6 +1609,7 @@ fun CameraActiveScreen(
         val activePreset by viewModel.activePreset.collectAsState()
         val selfTimerMode by viewModel.selfTimerMode.collectAsState()
         var showPresetPicker by remember { mutableStateOf(false) }
+        var pendingDelete by remember { mutableStateOf<File?>(null) }
 
         // Lambda that executes the actual capture, extracted so timer can call it
         val doCapture: () -> Unit = {
@@ -1956,6 +1958,69 @@ fun CameraActiveScreen(
             )
         }
 
+        // Delete confirmation dialog. Intercepted before the PhotoViewerOverlay
+        // callback reaches viewModel.deletePhoto() so an accidental tap on the
+        // trash icon doesn't nuke the file. The dialog lives at this scope
+        // (above the photo viewer) so back-press / scrim tap dismisses the
+        // dialog first, not the viewer underneath.
+        pendingDelete?.let { fileToDelete ->
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.Delete,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            "Delete photo?",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp
+                        )
+                    }
+                },
+                text = {
+                    Text(
+                        "This photo will be permanently deleted from this device. " +
+                            "This action cannot be undone.",
+                        color = Color(0xFF9CA3AF),
+                        fontSize = 14.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            // Order matters: kick off the (async, IO-bound) delete
+                            // first, then close the dialog. Flipping these two
+                            // would dismiss the dialog before the file is gone
+                            // and leave the user wondering if the tap registered.
+                            viewModel.deletePhoto(context, fileToDelete)
+                            pendingDelete = null
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFEF4444),
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.testTag("confirm_delete_button")
+                    ) {
+                        Text("Delete", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingDelete = null }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                },
+                containerColor = Color(0xFF1E1E1E),
+                tonalElevation = 0.dp
+            )
+        }
+
 
         // 7. Photo Viewer Overlay
         AnimatedVisibility(
@@ -1970,7 +2035,7 @@ fun CameraActiveScreen(
                     allPhotos = capturedPhotos,
                     viewModel = viewModel,
                     onClose = { viewModel.setSelectedPhoto(null) },
-                    onDelete = { file -> viewModel.deletePhoto(context, file) },
+                    onDelete = { file -> pendingDelete = file },
                     onSelectPhoto = { viewModel.setSelectedPhoto(it) }
                 )
             }
@@ -2056,7 +2121,8 @@ fun PhotoViewerOverlay(
 
                 IconButton(
                     onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete(photo) },
-                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF2A1C1C))
+                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF2A1C1C)),
+                    modifier = Modifier.testTag("delete_photo_button")
                 ) {
                     Icon(imageVector = Icons.Rounded.Delete, contentDescription = "Delete captured photo", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
                 }

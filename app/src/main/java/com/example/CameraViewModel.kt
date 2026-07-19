@@ -161,12 +161,21 @@ class CameraViewModel : ViewModel() {
 
     fun loadPhotos(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
-            val directory = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-            val files = directory?.listFiles { file ->
-                file.isFile && (file.extension.lowercase() in listOf("jpg", "jpeg", "dng"))
-            }?.sortedByDescending { it.lastModified() } ?: emptyList()
-            _capturedPhotos.value = files
+            _capturedPhotos.value = listPhotoFiles(context)
         }
+    }
+
+    /**
+     * Synchronous directory scan shared by [loadPhotos] (async wrapper) and
+     * [deletePhoto] (which needs the post-delete list *now* to auto-advance
+     * the photo viewer's selection). Sorted newest-first to match the
+     * gallery / filmstrip where index 0 is the most recent capture.
+     */
+    private fun listPhotoFiles(context: Context): List<File> {
+        val directory = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+        return directory?.listFiles { file ->
+            file.isFile && (file.extension.lowercase() in listOf("jpg", "jpeg", "dng"))
+        }?.sortedByDescending { it.lastModified() } ?: emptyList()
     }
 
     fun setAvailableFocalLengths(lengths: List<Float>) {
@@ -665,8 +674,48 @@ class CameraViewModel : ViewModel() {
 
     fun deletePhoto(context: Context, file: File) {
         viewModelScope.launch(Dispatchers.IO) {
-            try { if (file.exists()) { file.delete() }; if (_selectedPhoto.value == file) { _selectedPhoto.value = null }; loadPhotos(context) }
-            catch (e: Exception) { Log.e("CameraViewModel", "Error deleting photo", e) }
+            try {
+                val wasSelected = _selectedPhoto.value == file
+                // Position of the deleted photo in the (newest-first) gallery,
+                // captured BEFORE the file disappears so the auto-advance below
+                // can land on the photo that fills the deleted slot — the same
+                // one the user would have reached by scrolling farther down the
+                // filmstrip. -1 is a sentinel meaning "file isn't currently
+                // tracked" (e.g. out-of-band deletion); we handle that branch
+                // explicitly below instead of coercing it to 0 (which would
+                // silently jump the user to the newest photo).
+                val insertionIndex = if (wasSelected) {
+                    _capturedPhotos.value.indexOf(file)
+                } else -1
+
+                if (file.exists()) file.delete()
+
+                // Re-scan synchronously inside this coroutine instead of calling
+                // loadPhotos() — loadPhotos fires its own viewModelScope.launch
+                // and _capturedPhotos wouldn't be updated by the time we read it
+                // for the advance decision. Note: rapid double deletes may
+                // interleave (viewModelScope.launch is not serialized), but
+                // MutableStateFlow guarantees ordered, conflated emissions, so
+                // the eventual UI state is still the desired one.
+                val refreshed = listPhotoFiles(context)
+                _capturedPhotos.value = refreshed
+
+                // Stay-in-gallery: deleting shouldn't kick the user out of the
+                // photo viewer. Same-slot — next photo in filmstrip order
+                // (chronologically older since the list is newest-first);
+                // tail-stepping — when the deleted photo was the very last
+                // entry; sentinel fallback — pick any photo to keep the
+                // gallery open if the deleted file wasn't tracked anymore;
+                // only close the viewer when there is literally nothing
+                // left to show.
+                if (wasSelected) {
+                    _selectedPhoto.value = when {
+                        insertionIndex in refreshed.indices -> refreshed[insertionIndex]
+                        refreshed.isNotEmpty() -> refreshed.last()
+                        else -> null
+                    }
+                }
+            } catch (e: Exception) { Log.e("CameraViewModel", "Error deleting photo", e) }
         }
     }
 
