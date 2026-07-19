@@ -202,6 +202,7 @@ fun CameraPreviewView(
     isFrontCamera: Boolean,
     activeExtension: CaptureExtension = CaptureExtension.NONE,
     isRawCapturing: Boolean = false,
+    zoomEnabled: Boolean = true,
     onZoomChanged: (Float) -> Unit,
     onZoomTick: () -> Unit = {},
     onAvailableFocalLengths: (List<Float>) -> Unit,
@@ -232,48 +233,86 @@ fun CameraPreviewView(
     var camera by remember { mutableStateOf<Camera?>(null) }
     var activeImageCapture by remember { mutableStateOf(imageCapture) }
 
+    // Cache the lens catalog across recompositions. LensCatalog.enumerate()
+    // blocks while reading Camera2 characteristics for every camera on the
+    // device (50-200ms on most phones) — running it inside the rebind
+    // LaunchedEffect meant every lens tap paid that cost on the main
+    // thread, contributing to the visible black-flash gap. We do the
+    // enumeration exactly once here and stash the result in a holder so
+    // the rebind path can read it synchronously without triggering the
+    // SystemCamera stall again.
+    val catalogHolder = remember { CatalogHolder() }
+
+    // Hoist PreviewSessionManager to a `remember`-ed instance. Previous
+    // versions constructed one inside the LaunchedEffect body, which meant
+    // a fresh manager (and a nulled-out currentPreview / currentImageCapture
+    // / currentLogicalCameraId) every time the effect re-keyed. That broke
+    // the in-place-replace + recovery strategy entirely — the recovery
+    // branch could never find `previousPreview` because each effect had a
+    // brand-new manager. Keeping the instance alive across all composition
+    // passes lets the bind path see the use cases we previously attached
+    // and properly rollback / recover on failure.
+    val previewManager = remember { PreviewSessionManager(context, lifecycleOwner) }
+
     LaunchedEffect(activeImageCapture) { imageCaptureProvider(activeImageCapture) }
 
-    // Enumerate cameras
+    // Enumerate cameras once. The catalog result is also surfaced to the
+    // ViewModel via onLensCatalogReady so it can drive the focal-bubble
+    // row and the auto-correct-initial-lens logic.
     LaunchedEffect(Unit) {
-        val catalog = LensCatalog(context)
-        val result = catalog.enumerate()
-        onAvailableFocalLengths(result.allLenses.map { it.equivFocalMm }.sorted())
-        onLensCatalogReady?.invoke(result)
+        if (catalogHolder.value == null) {
+            val catalog = LensCatalog(context)
+            val result = catalog.enumerate()
+            catalogHolder.value = result
+            onAvailableFocalLengths(result.allLenses.map { it.equivFocalMm }.sorted())
+            onLensCatalogReady?.invoke(result)
+        }
     }
 
-    // Bind camera — rebinds on lens role, front/back, extension change, or RAW capture start
-    LaunchedEffect(selectedLensRole, isFrontCamera, activeExtension, isRawCapturing) {
+    // Bind camera — re-keys on the inputs that actually require a new
+    // CameraX session. We keep catalogHolder.value in the keys so a
+    // rebind that fires BEFORE the enumeration completes will re-fire
+    // once the catalog lands; otherwise the early `?: return@LaunchedEffect`
+    // below would silently no-op the user's first lens tap.
+    LaunchedEffect(
+        selectedLensRole,
+        isFrontCamera,
+        activeExtension,
+        isRawCapturing,
+        catalogHolder.value
+    ) {
         val cp = try { cameraProviderFuture.get() } catch (e: Exception) { null } ?: return@LaunchedEffect
 
         if (isRawCapturing) {
-            // RELEASE the camera so RawCapture (Camera2) can take over exclusively.
-            // Contention for the same camera device usually leads to CAMERA_ERROR(3).
-            cp.unbindAll()
+            // RELEASE the camera so RawCapture (Camera2) can take over
+            // exclusively. Contention for the same camera device usually
+            // leads to CAMERA_ERROR(3). Use PreviewSessionManager.release()
+            // so it forgets its tracked use cases too — otherwise the
+            // post-RAW recovery bind risks re-attaching stale use cases.
+            previewManager.release(cp)
             camera = null
             return@LaunchedEffect
         }
 
-        val executor = ContextCompat.getMainExecutor(context)
-
         try {
             if (isFrontCamera) {
-                val cs = CameraSelector.DEFAULT_FRONT_CAMERA
-                cp.unbindAll()
-                camera = cp.bindToLifecycle(lifecycleOwner, cs,
-                    Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) },
-                    imageCapture)
+                val boundCam = previewManager.bindDefaultCamera(
+                    cameraProvider = cp,
+                    surfaceProvider = previewView.surfaceProvider,
+                    imageCapture = imageCapture,
+                    isFrontCamera = true,
+                    flashMode = flashMode
+                )
+                camera = boundCam
                 activeImageCapture = imageCapture
             } else {
-                val catalog = LensCatalog(context)
-                val result = catalog.enumerate()
+                val catalog = catalogHolder.value ?: return@LaunchedEffect
                 val targetProfile = when (selectedLensRole) {
-                    LensRole.ULTRA_WIDE -> result.ultraWide
-                    LensRole.PRIMARY -> result.primary
-                    LensRole.TELE -> result.tele
+                    LensRole.ULTRA_WIDE -> catalog.ultraWide
+                    LensRole.PRIMARY -> catalog.primary
+                    LensRole.TELE -> catalog.tele
                 }
 
-                val previewManager = PreviewSessionManager(context, lifecycleOwner)
                 val bound = if (targetProfile != null) {
                     previewManager.bindPreview(
                         cameraProvider = cp,
@@ -286,11 +325,19 @@ fun CameraPreviewView(
                 } else null
 
                 if (bound == null) {
-                    val cs = CameraSelector.DEFAULT_BACK_CAMERA
-                    cp.unbindAll()
-                    camera = cp.bindToLifecycle(lifecycleOwner, cs,
-                        Preview.Builder().build().apply { setSurfaceProvider(previewView.surfaceProvider) },
-                        imageCapture)
+                    // No LensProfile for the requested role, OR the bind
+                    // failed and recovery didn't apply (see
+                    // PreviewSessionManager). Fall back to
+                    // DEFAULT_BACK_CAMERA so the viewfinder is never
+                    // empty.
+                    val boundCam = previewManager.bindDefaultCamera(
+                        cameraProvider = cp,
+                        surfaceProvider = previewView.surfaceProvider,
+                        imageCapture = imageCapture,
+                        isFrontCamera = false,
+                        flashMode = flashMode
+                    )
+                    camera = boundCam
                     activeImageCapture = imageCapture
                 } else {
                     camera = bound.camera
@@ -337,12 +384,14 @@ fun CameraPreviewView(
     val currentDigitalZoom by rememberUpdatedState(digitalZoomRatio)
     val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
     val currentOnZoomTick by rememberUpdatedState(onZoomTick)
+    val currentZoomEnabled by rememberUpdatedState(zoomEnabled)
 
     AndroidView(
         factory = { previewView },
-        modifier = modifier.fillMaxSize().pointerInput(Unit) {
+        modifier = modifier.fillMaxSize().pointerInput(zoomEnabled) {
             val heightPx = size.height.toFloat().coerceAtLeast(1f)
             awaitEachGesture {
+                if (!currentZoomEnabled) return@awaitEachGesture
                 awaitFirstDown(requireUnconsumed = false)
                 // Seed from the current VM value so the gesture doesn't jump
                 var runningZoom = currentDigitalZoom
@@ -383,6 +432,17 @@ fun CameraPreviewView(
 private fun tickIndexOf(zoom: Float): Int {
     if (zoom <= 0f) return 0
     return (kotlin.math.ln(zoom) / kotlin.math.ln(1.08f)).toInt()
+}
+
+/**
+ * Tiny mutable holder for the cached LensCatalog result. We need an object
+ * (not by-value state) so the rebind `LaunchedEffect` reads the same
+ * instance the enumeration effect wrote to without re-running when Compose
+ * state changes — Compose treats `mutableStateOf` updates as recompositions,
+ * which we explicitly want to avoid on the rebind path.
+ */
+private class CatalogHolder {
+    var value: LensCatalog.CatalogResult? = null
 }
 
 fun triggerImageCapture(

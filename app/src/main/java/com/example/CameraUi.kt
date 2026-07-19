@@ -131,6 +131,9 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDown
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
@@ -160,6 +163,17 @@ import com.google.accompanist.permissions.rememberPermissionState
 import java.io.File
 
 private const val FLASH_BURST_DURATION_MS = 120L
+
+/**
+ * Per-pointer state kept by the passive full-screen swipe overlay.
+ */
+private class TrackedPointer(
+    val start: Offset,
+    val initialExposure: Float,
+    val initialTemp: Float,
+    val initialTint: Float,
+    var moved: Boolean = false
+)
 
 /**
  * Draws a rule-of-thirds grid (4 lines at width/height thirds) inside [rect].
@@ -1313,6 +1327,7 @@ fun CameraActiveScreen(
             isFrontCamera = isFrontCamera,
             activeExtension = activeExtension,
             isRawCapturing = isCapturing && rawModeEnabled,
+            zoomEnabled = !(showExpSlider || showTempSlider),
             onZoomChanged = { viewModel.setZoom(it) },
             onZoomTick = {
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -1635,6 +1650,70 @@ fun CameraActiveScreen(
             exit = fadeOut(animationSpec = tween(150))
         ) {
             Box(modifier = Modifier.fillMaxSize().background(Color.White))
+        }
+
+        // Transparent overlay for full-screen swipe when a slider panel is
+        // open. Does NOT call awaitFirstDown so it never claims a pointer
+        // away from children (buttons, slider, color plot).  The first
+        // awaitPointerEvent(Main) observes the down alongside children;
+        // subsequent events use PointerEventPass.Final after children.
+        if (showExpSlider || showTempSlider) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(showExpSlider, showTempSlider) {
+                        awaitEachGesture {
+                            val first = awaitPointerEvent(PointerEventPass.Main)
+                            val down = first.changes.firstOrNull { it.changedToDown() && it.pressed }
+                                    ?: return@awaitEachGesture
+                            val track = TrackedPointer(
+                                start = down.position,
+                                initialExposure = exposure,
+                                initialTemp = temperature,
+                                initialTint = tint
+                            )
+                            var consumedByChild = false
+                            do {
+                                val event = awaitPointerEvent(PointerEventPass.Final)
+                                val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                                consumedByChild = consumedByChild || ch.isConsumed
+                                if (!ch.isConsumed && ch.pressed) {
+                                    val dx = ch.position.x - track.start.x
+                                    val dy = ch.position.y - track.start.y
+
+                                    if (showExpSlider && kotlin.math.abs(dx) > 10f) {
+                                        track.moved = true
+                                        val raw = track.initialExposure + (dx / size.width.toFloat()) * 6f
+                                        val s = (kotlin.math.round(raw / 0.1f) * 0.1f).coerceIn(-3f, 3f)
+                                        if (s != exposure) {
+                                            viewModel.setExposure(s)
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                        ch.consume()
+                                    }
+
+                                    if (showTempSlider && (kotlin.math.abs(dx) > 10f || kotlin.math.abs(dy) > 10f)) {
+                                        track.moved = true
+                                        val rt = track.initialTemp + (dx / size.width.toFloat()) * 4f
+                                        val rti = track.initialTint - (dy / size.height.toFloat()) * 4f
+                                        val st = (kotlin.math.round(rt / 0.1f) * 0.1f).coerceIn(-2f, 2f)
+                                        val sti = (kotlin.math.round(rti / 0.1f) * 0.1f).coerceIn(-2f, 2f)
+                                        if (st != temperature || sti != tint) {
+                                            viewModel.setTemperature(st)
+                                            viewModel.setTint(sti)
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                        ch.consume()
+                                    }
+                                }
+                            } while (ch.pressed)
+
+                            if (!track.moved && !consumedByChild) {
+                                viewModel.closeSliders()
+                            }
+                        }
+                    }
+            )
         }
 
         // 6. Bottom Deck Controls (two-row Dazz-cam style)
