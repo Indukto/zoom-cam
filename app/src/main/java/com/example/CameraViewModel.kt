@@ -172,10 +172,37 @@ class CameraViewModel : ViewModel() {
      * gallery / filmstrip where index 0 is the most recent capture.
      */
     private fun listPhotoFiles(context: Context): List<File> {
-        val directory = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-        return directory?.listFiles { file ->
-            file.isFile && (file.extension.lowercase() in listOf("jpg", "jpeg", "dng"))
-        }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        // Two locations hold our captures:
+        //   1. App-private: getExternalFilesDir(DIRECTORY_PICTURES) — working
+        //      copies written straight from the capture pipeline.
+        //   2. Public-shared MediaStore mirror: Pictures/ZoomBoxCamera/ (plus
+        //      its RAW subfolder). After an app reinstall the private copy
+        //      is wiped but the MediaStore entries survive — scanning the
+        //      public tree is what surfaces the user's old photos at startup.
+        val privateDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+        val publicRoot = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+            "ZoomBoxCamera"
+        )
+
+        fun isOurPhoto(file: File): Boolean =
+            file.isFile && file.extension.lowercase() in listOf("jpg", "jpeg", "dng")
+
+        val privateFiles = privateDir?.listFiles(::isOurPhoto)?.toList() ?: emptyList()
+        // runCatching guards against scoped-storage edge cases where the
+        // public tree exists but listFiles() refuses to descend it (some
+        // OEM ROM builds post-API-29). walkTopDown() also picks up DNGs in
+        // ZoomBoxCamera/RAW/ alongside the JPEGs in the root.
+        val publicFiles = runCatching {
+            publicRoot.walkTopDown().filter(::isOurPhoto).toList()
+        }.getOrDefault(emptyList())
+
+        // Public first, then private — distinctBy { it.name } keeps the
+        // public entry when both copies exist, so the file we hand to
+        // deletePhoto() is the canonical (reinstall-survived) path.
+        return (publicFiles + privateFiles)
+            .distinctBy { it.name }
+            .sortedByDescending { it.lastModified() }
     }
 
     fun setAvailableFocalLengths(lengths: List<Float>) {
@@ -688,7 +715,16 @@ class CameraViewModel : ViewModel() {
                     _capturedPhotos.value.indexOf(file)
                 } else -1
 
-                if (file.exists()) file.delete()
+                // The file passed in is whichever copy listPhotoFiles
+                // surfaced (public takes precedence). There may still be a
+                // same-name mirror in the app-private dir — delete that too
+                // so a subsequent startup scan doesn't re-surface it as a
+                // duplicate after the public copy was removed.
+                val privateMirror = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                    ?.let { File(it, file.name) }
+                listOfNotNull(file, privateMirror).distinct().forEach { candidate ->
+                    if (candidate.exists()) candidate.delete()
+                }
 
                 // Re-scan synchronously inside this coroutine instead of calling
                 // loadPhotos() — loadPhotos fires its own viewModelScope.launch
