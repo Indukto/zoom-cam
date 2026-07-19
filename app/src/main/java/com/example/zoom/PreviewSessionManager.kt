@@ -250,27 +250,19 @@ class PreviewSessionManager(
         val previousLogicalCameraId = currentLogicalCameraId
 
         return try {
-            // ───── matched-unbind path ───────────────────────────────────
+            // ───── unbindAll path ────────────────────────────────────────
             // CameraX's `bindToLifecycle(selector, new...)` is NOT an atomic
             // replace on devices that constrain the surface combination
             // count (Xiaomi/MTK only advertises a single PRIV/PREVIEW slot
-            // and a single JPEG/STILL_CAPTURE slot). Calling unbind on the
-            // previously-attached pair FIRST drops those surface
-            // allocations, so when we then add the new pair the HAL only
-            // sees the new pair.
+            // and a single JPEG/STILL_CAPTURE slot). Selective `unbind()`
+            // is asynchronous on these HALs — the old surfaces aren't torn
+            // down before `bindToLifecycle` validates the combined set,
+            // causing "No supported surface combination" with 4 surfaces
+            // (2 existing + 2 new) where only 2 are supported.
             //
-            // The combined `unbind(prev) + bindToLifecycle(new)` still
-            // closes the CameraDevice briefly when these are the only two
-            // use cases bound — that's why the user previously saw a
-            // momentary black flash on lens switch. The accompanying
-            // `bad pFeatureSettingQuery` + `getMipiError:64` symptom in
-            // logcat during that close/reopen is mitigated below in
-            // applyDistortionCorrection / applyHotPixelMode by gating the
-            // highest-quality modes so the HAL doesn't have to negotiate
-            // a feature combination that isn't stable across the cycle.
-            if (previousPreview != null && previousImageCapture != null) {
-                cameraProvider.unbind(previousPreview, previousImageCapture)
-            }
+            // `unbindAll()` guarantees all surfaces are released before the
+            // new bind, at the cost of a brief black flash on lens switch.
+            cameraProvider.unbindAll()
             val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 selector,
@@ -622,25 +614,16 @@ class PreviewSessionManager(
             CameraSelector.DEFAULT_BACK_CAMERA
         }
 
-        // Same in-place replace strategy as bindPreview: do not unbindAll
-        // before binding the new use cases. If the bind fails, fall back
-        // to the previously tracked use cases so the viewfinder stays on
-        // whatever it was already showing.
-        //
-        // We DO selective-unbind here too: CameraX cannot add another pair
-        // of Preview + ImageCapture use cases on top of the existing pair
-        // (see the long comment in bindPreview for the HAL surface combo
-        // explanation). The selective unbind closes the camera briefly if
-        // these were the only two use cases bound, but that's a result of
-        // the HAL slot limit rather than anything we can avoid at the
-        // CameraX API layer on this device.
+        // Same unbindAll strategy as bindPreview: selective unbind is
+        // asynchronous on Xiaomi/MTK HALs and causes "No supported surface
+        // combination" because old surfaces linger during the new bind.
+        // unbindAll guarantees a clean slate, at the cost of a brief black
+        // flash on switch.
         val previousPreview = currentPreview
         val previousImageCapture = currentImageCapture
 
         return try {
-            if (previousPreview != null && previousImageCapture != null) {
-                cameraProvider.unbind(previousPreview, previousImageCapture)
-            }
+            cameraProvider.unbindAll()
             val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 selector,

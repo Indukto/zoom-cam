@@ -1254,14 +1254,7 @@ fun CameraActiveScreen(
     }
 
     BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
-                viewModel.closeSliders()
-            }
+        modifier = Modifier.fillMaxSize()
     ) {
         val totalWidth = maxWidth
         val totalHeight = maxHeight
@@ -1708,7 +1701,12 @@ fun CameraActiveScreen(
                                 }
                             } while (ch.pressed)
 
-                            if (!track.moved && !consumedByChild) {
+                            // Close on tap (no value adjusted, no child consumed)
+                            if (!consumedByChild &&
+                                track.initialExposure == exposure &&
+                                track.initialTemp == temperature &&
+                                track.initialTint == tint
+                            ) {
                                 viewModel.closeSliders()
                             }
                         }
