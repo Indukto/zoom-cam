@@ -319,7 +319,8 @@ private fun SpectrumSlider(
                     .pointerInput(valueRange, step) {
                         detectTapGestures(
                             onTap = { offset ->
-                                onValueChange(pxToValue(offset.x))
+                                val v = pxToValue(offset.x)
+                                onValueChange(v)
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             },
                             onDoubleTap = if (doubleTapToReset) {
@@ -336,6 +337,8 @@ private fun SpectrumSlider(
                             // Track the last *snapped* value so we can tick the
                             // haptic exactly when crossing into a new step.
                             val target = snap(value + (delta / trackWidthPx.coerceAtLeast(1f)) * range)
+                            // Use snap(value) to compare against the *current* state value.
+                            // If they differ, we crossed a step boundary.
                             if (step != null && target != snap(value)) {
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             }
