@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
@@ -2031,7 +2033,7 @@ fun CameraActiveScreen(
             val activePhoto = selectedPhoto
             if (activePhoto != null) {
                 PhotoViewerOverlay(
-                    photo = activePhoto,
+                    initialPhotoIndex = capturedPhotos.indexOf(activePhoto).coerceAtLeast(0),
                     allPhotos = capturedPhotos,
                     viewModel = viewModel,
                     onClose = { viewModel.setSelectedPhoto(null) },
@@ -2045,7 +2047,7 @@ fun CameraActiveScreen(
 
 @Composable
 fun PhotoViewerOverlay(
-    photo: File,
+    initialPhotoIndex: Int,
     allPhotos: List<File>,
     viewModel: CameraViewModel,
     onClose: () -> Unit,
@@ -2054,26 +2056,18 @@ fun PhotoViewerOverlay(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
 
-    var exifData by remember(photo) { mutableStateOf(ExifData()) }
-    LaunchedEffect(photo) { exifData = viewModel.readExifData(photo) }
+    val pagerState = rememberPagerState(
+        initialPage = initialPhotoIndex.coerceIn(0, (allPhotos.size - 1).coerceAtLeast(0)),
+        pageCount = { allPhotos.size }
+    )
 
-    // Read each photo's actual on-disk pixel dimensions so the gallery card
-    // renders at the real capture aspect ratio (1:1 / 2:3 portrait / 3:4
-    // portrait) instead of always forcing 4:3 landscape. BitmapFactory with
-    // inJustDecodeBounds = true does a header-only decode (no pixels), so
-    // it runs in milliseconds even for the full capture directory.
-    var photoDims by remember(photo) { mutableStateOf<IntSize?>(null) }
-    LaunchedEffect(photo) {
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(photo.absolutePath, options)
-        val w = options.outWidth
-        val h = options.outHeight
-        if (w > 0 && h > 0) photoDims = IntSize(w, h)
+    LaunchedEffect(pagerState.currentPage) {
+        if (allPhotos.isNotEmpty()) {
+            onSelectPhoto(allPhotos[pagerState.currentPage])
+        }
     }
-    // width/height ratio: 1:1 → 1.0, 3:4 portrait → 0.75, 2:3 portrait → 0.667.
-    // 1f / 1.35f fallback matches the legacy 4:3 assumption while bounds load.
-    val photoAspect = photoDims?.let { d -> d.width.toFloat() / d.height.toFloat() } ?: (1f / 1.35f)
 
     val phoneName = Build.MODEL
     BackHandler(onBack = onClose)
@@ -2082,6 +2076,7 @@ fun PhotoViewerOverlay(
         modifier = Modifier.fillMaxSize().background(Color.Black).padding(top = 16.dp)
     ) {
         // Upper Title Deck
+        val currentPhoto = allPhotos.getOrNull(pagerState.currentPage)
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -2100,61 +2095,84 @@ fun PhotoViewerOverlay(
                 letterSpacing = 1.sp, fontFamily = FontFamily.Serif
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButton(
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        try {
-                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", photo)
-                            val intent = Intent(Intent.ACTION_SEND).apply {
-                                type = "image/jpeg"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            context.startActivity(Intent.createChooser(intent, "Share Retro Photo"))
-                        } catch (e: Exception) { Log.e("PhotoViewerOverlay", "Error sharing photo", e) }
-                    },
-                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E))
-                ) {
-                    Icon(imageVector = Icons.Rounded.Share, contentDescription = "Share retro capture", tint = Color.White, modifier = Modifier.size(18.dp))
-                }
+            if (currentPhoto != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            try {
+                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", currentPhoto)
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "image/jpeg"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share Retro Photo"))
+                            } catch (e: Exception) { Log.e("PhotoViewerOverlay", "Error sharing photo", e) }
+                        },
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF1C1C1E))
+                    ) {
+                        Icon(imageVector = Icons.Rounded.Share, contentDescription = "Share retro capture", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
 
-                IconButton(
-                    onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete(photo) },
-                    colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF2A1C1C)),
-                    modifier = Modifier.testTag("delete_photo_button")
-                ) {
-                    Icon(imageVector = Icons.Rounded.Delete, contentDescription = "Delete captured photo", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
+                    IconButton(
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete(currentPhoto) },
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFF2A1C1C)),
+                        modifier = Modifier.testTag("delete_photo_button")
+                    ) {
+                        Icon(imageVector = Icons.Rounded.Delete, contentDescription = "Delete captured photo", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
+                    }
                 }
             }
         }
 
-        // Photo Card
-        Box(
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Card(
-                modifier = Modifier.fillMaxWidth().aspectRatio(photoAspect),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FAF9)),
-                shape = RoundedCornerShape(12.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
+        // Photo Pager
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            beyondViewportPageCount = 1
+        ) { page ->
+            val photo = allPhotos[page]
+
+            var exifData by remember(photo) { mutableStateOf(ExifData()) }
+            LaunchedEffect(photo) { exifData = viewModel.readExifData(photo) }
+
+            var photoDims by remember(photo) { mutableStateOf<IntSize?>(null) }
+            LaunchedEffect(photo) {
+                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(photo.absolutePath, options)
+                val w = options.outWidth
+                val h = options.outHeight
+                if (w > 0 && h > 0) photoDims = IntSize(w, h)
+            }
+            val photoAspect = photoDims?.let { d -> d.width.toFloat() / d.height.toFloat() } ?: (1f / 1.35f)
+
+            Box(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
+                contentAlignment = Alignment.Center
             ) {
-                Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-                    Image(
-                        painter = rememberAsyncImagePainter(model = photo),
-                        contentDescription = "Enlarged capture",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(8.dp))
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(text = phoneName, fontSize = 12.sp, fontWeight = FontWeight.Normal, color = Color.Black.copy(alpha = 0.55f), fontFamily = FontFamily.Serif, modifier = Modifier.padding(horizontal = 4.dp))
-                        Text(text = "${exifData.focalLength}  ${exifData.shutterSpeed}  ${exifData.iso}", fontSize = 12.sp, fontWeight = FontWeight.Normal, color = Color.Black.copy(alpha = 0.55f), fontFamily = FontFamily.Serif, modifier = Modifier.padding(horizontal = 4.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth().aspectRatio(photoAspect),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FAF9)),
+                    shape = RoundedCornerShape(12.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 16.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+                        Image(
+                            painter = rememberAsyncImagePainter(model = photo),
+                            contentDescription = "Enlarged capture",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(8.dp))
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = phoneName, fontSize = 12.sp, fontWeight = FontWeight.Normal, color = Color.Black.copy(alpha = 0.55f), fontFamily = FontFamily.Serif, modifier = Modifier.padding(horizontal = 4.dp))
+                            Text(text = "${exifData.focalLength}  ${exifData.shutterSpeed}  ${exifData.iso}", fontSize = 12.sp, fontWeight = FontWeight.Normal, color = Color.Black.copy(alpha = 0.55f), fontFamily = FontFamily.Serif, modifier = Modifier.padding(horizontal = 4.dp))
+                        }
                     }
                 }
             }
@@ -2168,12 +2186,16 @@ fun PhotoViewerOverlay(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(items = allPhotos, key = { it.absolutePath }) { item ->
-                    val isSelected = item == photo
+                    val idx = allPhotos.indexOf(item)
+                    val isSelected = idx == pagerState.currentPage
                     Box(
                         modifier = Modifier
                             .size(62.dp).clip(RoundedCornerShape(6.dp))
                             .border(width = if (isSelected) 3.dp else 0.dp, color = if (isSelected) Color(0xFFF59E0B) else Color.Transparent, shape = RoundedCornerShape(6.dp))
-                            .clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onSelectPhoto(item) }
+                            .clickable {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                scope.launch { pagerState.animateScrollToPage(idx) }
+                            }
                     ) {
                         Image(painter = rememberAsyncImagePainter(model = item), contentDescription = "Filmstrip photo", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     }

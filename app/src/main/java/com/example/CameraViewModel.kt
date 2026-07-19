@@ -214,8 +214,48 @@ class CameraViewModel : ViewModel() {
 
     fun setLensCatalogResult(result: LensCatalog.CatalogResult) {
         lensCatalogResult = result
+        // The default _selectedLensRole is PRIMARY (24mm-ish). On devices
+        // without a primary-class lens the initial preview stays black
+        // because the binding fails silently. Auto-correct the initial
+        // selection to the first available back-facing lens so the
+        // viewfinder lights up at app start even without a 24mm hardware
+        // camera. Mirrors the user's bug: "Ich habe keine Kamera '24' —
+        // die App switcht beim Start zu dieser Kamera".
+        ensureSelectedLensAvailable()
         recalculateState()
         refreshRawAvailabilityForCurrentLens()
+    }
+
+    /**
+     * Auto-correction for the initial lens selection: if the currently
+     * selected role isn't backed by a physical lens on this device, step
+     * down the priority ladder PRIMARY → ULTRA_WIDE → TELE and pick the
+     * first role the catalog actually has. If the device has no back-facing
+     * lenses at all, leave the selection unchanged and let the preview's
+     * DEFAULT_BACK_CAMERA fallback path handle the binding.
+     */
+    private fun ensureSelectedLensAvailable() {
+        val catalog = lensCatalogResult ?: return
+        val current = _selectedLensRole.value
+        val currentAvailable = when (current) {
+            LensRole.ULTRA_WIDE -> catalog.ultraWide != null
+            LensRole.PRIMARY -> catalog.primary != null
+            LensRole.TELE -> catalog.tele != null
+        }
+        if (currentAvailable) return
+
+        val fallback = when {
+            catalog.primary != null -> LensRole.PRIMARY
+            catalog.ultraWide != null -> LensRole.ULTRA_WIDE
+            catalog.tele != null -> LensRole.TELE
+            else -> return  // no back cameras; leave selection for the
+                             // preview's DEFAULT_BACK_CAMERA path
+        }
+        _selectedLensRole.value = fallback
+        // Mirror cycleLens(): bump the switch trigger so the CameraPreviewView
+        // re-keys and the binding re-fires against the corrected role.
+        _lensSwitchTrigger.value = _lensSwitchTrigger.value + 1
+        _digitalZoomRatio.value = 1.0f
     }
 
     fun setZoom(ratio: Float) {
