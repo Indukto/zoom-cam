@@ -55,6 +55,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -1746,7 +1747,7 @@ fun CameraActiveScreen(
                         Icon(
                             imageVector = Icons.Rounded.Timer,
                             contentDescription = "Timer Off",
-                            tint = Color.Gray,
+                            tint = Color.White,
                             modifier = Modifier.size(18.dp)
                         )
                     } else {
@@ -2101,13 +2102,24 @@ fun PhotoViewerOverlay(
     val phoneName = Build.MODEL
     BackHandler(onBack = onClose)
 
+    // Outer Column keeps its original top = 16 dp baseline so non-cutout
+    // phones see no visual change. The cutout-safe offset is supplied by
+    // the inner Row below.
     Column(
         modifier = Modifier.fillMaxSize().background(Color.Black).padding(top = 16.dp)
     ) {
-        // Upper Title Deck
         val currentPhoto = allPhotos.getOrNull(pagerState.currentPage)
+        // displayCutoutPadding() pads by the device's display-cutout inset
+        // only where one exists: center cutouts get top padding (~32 dp on
+        // Pixel 6+ / Dynamic Island on iPhone 14 Pro), top-LEFT/TOP-RIGHT
+        // corner cutouts get vertical AND horizontal padding (Pixel 6 Pro,
+        // OnePlus 7, Galaxy S). Non-cutout phones report a 0 dp inset, so
+        // the X + "Gallery" row sits at the original y-offset.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .displayCutoutPadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -2260,10 +2272,17 @@ fun SettingsScreen(viewModel: CameraViewModel, onClose: () -> Unit) {
         color = Color(0xFF0E0E0E)
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar
+            // Top bar — displayCutoutPadding() pushes the X + "Settings"
+            // title away from the device's display cutout (notch / Dynamic
+            // Island / corner hole-punch). On non-cutout phones the inset is
+            // 0 dp so the row stays at the original y-offset (24 dp top
+            // padding is preserved verbatim); on cutout phones the cutout
+            // inset is added on top, so the row sits below the camera
+            // hardware on Pixel 6+, iPhone 14 Pro, Galaxy S, etc.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .displayCutoutPadding()
                     .padding(start = 4.dp, end = 16.dp, top = 24.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {

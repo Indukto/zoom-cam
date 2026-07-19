@@ -111,51 +111,66 @@ class PreviewSessionManager(
         flashMode: Int = 0,
         extension: CaptureExtension = CaptureExtension.NONE
     ): BindResult? {
-        return try {
-            val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val rotation = windowManager.defaultDisplay.rotation
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val rotation = windowManager.defaultDisplay.rotation
 
-            val characteristics = getCharacteristics(physicalCameraId)
-                ?: getCharacteristics(logicalCameraId)
+        val characteristics = getCharacteristics(physicalCameraId)
+            ?: getCharacteristics(logicalCameraId)
 
-            // Extensions own the sensor path; only the non-extension path routes
-            // to a specific physical lens (the app's signature behavior).
-            val usePhysicalLens = extension == CaptureExtension.NONE
+        // Extensions own the sensor path; only the non-extension path routes
+        // to a specific physical lens (the app's signature behavior).
+        //
+        // Also skip the physical-lens routing when the IDs are equal: that
+        // happens on single-lens devices/emulators (e.g. Pixel 5 AVD with
+        // physicalCameraIds == [cameraId]) where `setPhysicalCameraId()` is a
+        // documented no-op but in practice the HAL still has to undo the
+        // surface config, which on virtualised stacks can intermittently
+        // lead to an async `onConfigureFailed`. Letting the logical-camera
+        // path bind clean here is strictly safer.
+        val usePhysicalLens = extension == CaptureExtension.NONE &&
+            physicalCameraId != logicalCameraId
 
-            val preview = Preview.Builder()
-                .apply {
-                    if (usePhysicalLens) {
-                        Camera2Interop.Extender(this).setPhysicalCameraId(physicalCameraId)
-                    }
-                    applyQualityKeys(this, characteristics, isPreview = true)
+        val preview = Preview.Builder()
+            .apply {
+                if (usePhysicalLens) {
+                    Camera2Interop.Extender(this).setPhysicalCameraId(physicalCameraId)
                 }
-                .build()
-                .apply { setSurfaceProvider(surfaceProvider) }
-
-            val newImageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .setTargetRotation(rotation)
-                .apply {
-                    if (usePhysicalLens) {
-                        Camera2Interop.Extender(this).setPhysicalCameraId(physicalCameraId)
-                    }
-                    applyQualityKeys(this, characteristics, isPreview = false)
-                    when (flashMode) {
-                        0 -> setFlashMode(ImageCapture.FLASH_MODE_AUTO)
-                        1 -> setFlashMode(ImageCapture.FLASH_MODE_ON)
-                        else -> setFlashMode(ImageCapture.FLASH_MODE_OFF)
-                    }
-                }
-                .build()
-
-            val selector = if (usePhysicalLens) {
-                buildSelectorForLogicalCamera(logicalCameraId)
-            } else {
-                // Build the base logical selector, then layer the extension on top.
-                buildExtensionSelector(cameraProvider, logicalCameraId, extension)
-                    ?: buildSelectorForLogicalCamera(logicalCameraId)
+                applyQualityKeys(this, characteristics, isPreview = true)
             }
+            .build()
+            .apply { setSurfaceProvider(surfaceProvider) }
 
+        val newImageCapture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setTargetRotation(rotation)
+            .apply {
+                if (usePhysicalLens) {
+                    Camera2Interop.Extender(this).setPhysicalCameraId(physicalCameraId)
+                }
+                applyQualityKeys(this, characteristics, isPreview = false)
+                when (flashMode) {
+                    0 -> setFlashMode(ImageCapture.FLASH_MODE_AUTO)
+                    1 -> setFlashMode(ImageCapture.FLASH_MODE_ON)
+                    else -> setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                }
+            }
+            .build()
+
+        val selector = if (usePhysicalLens) {
+            buildSelectorForLogicalCamera(logicalCameraId)
+        } else {
+            // Build the base logical selector, then layer the extension on top.
+            buildExtensionSelector(cameraProvider, logicalCameraId, extension)
+                ?: buildSelectorForLogicalCamera(logicalCameraId)
+        }
+
+        return try {
+            // unbindAll() lives inside the try so that on a synchronous bind
+            // failure we still have whatever the previous invocation bound. If
+            // we'd called unbindAll() before catching (old ordering) we'd tear
+            // down a working preview before we even know the new bind will
+            // succeed, which is how we ended up with the Pixel 5 emulator's
+            // black-feed regression on the first failed retry.
             cameraProvider.unbindAll()
             val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
@@ -165,7 +180,18 @@ class PreviewSessionManager(
             )
             BindResult(camera, newImageCapture)
         } catch (e: Exception) {
-            Log.e(TAG, "Error binding preview to physical=$physicalCameraId logical=$logicalCameraId", e)
+            // Catches synchronous bind failures: IllegalStateException (from
+            // CameraX sel.validate(...) / registerAggregateSessionConfig),
+            // IllegalArgumentException (bad surface or use-case combo), and
+            // everything else. Async `onConfigureFailed` is raised later on
+            // CameraX's internal SequencerExecutor; that path is filtered
+            // upstream in LensCatalog.hasUsablePreviewStream because it
+            // cannot be caught here.
+            Log.e(
+                TAG,
+                "Error binding preview to physical=$physicalCameraId logical=$logicalCameraId",
+                e
+            )
             null
         }
     }

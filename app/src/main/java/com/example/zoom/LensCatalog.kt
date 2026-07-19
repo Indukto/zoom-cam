@@ -24,6 +24,16 @@ class LensCatalog(private val context: Context) {
         // Thresholds for identifying lens roles based on equivalent focal length
         private const val ULTRA_WIDE_THRESHOLD_MM = 20f
         private const val TELE_THRESHOLD_MM = 70f
+
+        /**
+         * Minimum image area we'll trust as a real Preview size for
+         * [hasUsablePreviewStream]. Some HALs claim a non-empty size table
+         * while the only entry is a 1×1 (or otherwise impractically small)
+         * placeholder; CameraX still tries to bind those and fails async.
+         * 320×240 (QVGA) is comfortably below anything a real preview
+         * pipeline would advertise on any Android device.
+         */
+        private const val MIN_PHANTOM_AREA_PX = 320 * 240
     }
 
     data class CatalogResult(
@@ -80,6 +90,24 @@ class LensCatalog(private val context: Context) {
 
                     if (focalLengths == null || focalLengths.isEmpty()) continue
 
+                    // Drop phantom physical IDs. Hardware emulators (Pixel 5 AVD,
+                    // older SDK profiles) sometimes expose a logical multi-camera
+                    // whose secondary physical sub-cams have no Preview / Video /
+                    // YUV_420_888 streams at all. Forcing setPhysicalCameraId() on
+                    // one of those via Camera2-Interop causes CameraX to fire
+                    // onConfigureFailed asynchronously and we end up with a black
+                    // feed we can't recover from inside the bind call. Filtering
+                    // out profiles whose sensor has no usable preview stream keeps
+                    // the catalog honest so only real lenses ever reach the bind.
+                    if (!hasUsablePreviewStream(lensChars)) {
+                        Log.w(
+                            TAG,
+                            "Skipping physical camera $physicalId: no YUV_420_888 " +
+                                "preview stream available (likely phantom sub-camera)"
+                        )
+                        continue
+                    }
+
                     // Use the widest (smallest) focal length as the lens's native focal length
                     val nativeFocalMm = focalLengths[0]
                     val cropFactor = computeCropFactor(physicalSize)
@@ -118,6 +146,15 @@ class LensCatalog(private val context: Context) {
         val ultraWide = profiles.find { it.role == LensRole.ULTRA_WIDE }
         val primary = profiles.find { it.role == LensRole.PRIMARY }
         val tele = profiles.find { it.role == LensRole.TELE }
+
+        if (profiles.isEmpty()) {
+            // Defensive: enumerating produced no usable back lens. The caller
+            // (CameraPreviewView) falls back to CameraSelector.DEFAULT_BACK_CAMERA,
+            // so preview/capture still work, but the bubble's focal-length label
+            // will stay empty. Surface a warning so this scenario is diagnosable
+            // from logcat rather than appearing as a silent regression.
+            Log.w(TAG, "enumerate(): no back-facing lenses with usable preview stream")
+        }
 
         return CatalogResult(
             ultraWide = ultraWide,
@@ -191,6 +228,41 @@ class LensCatalog(private val context: Context) {
     private fun estimateMaxAperture(characteristics: CameraCharacteristics): Float {
         val apertures = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
         return apertures?.minOrNull() ?: 2.0f
+    }
+
+    /**
+     * True when the sensor's stream config map advertises at least one
+     * `YUV_420_888` output size — i.e. the camera can actually deliver a
+     * Preview surface. A property of the physical sub-camera itself; we
+     * deliberately probe this *before* classifying/adding a profile so we
+     * never hand `PreviewSessionManager.setPhysicalCameraId(...)` an ID
+     * whose sensor can't stream.
+     *
+     * Backing rationale: Pixel-style AVDs frequently expose logical
+     * multi-camera configs with a "real" primary physical ID and one or more
+     * phantom placeholder IDs that Camera2 returns characteristics for but
+     * never publishes streams for. Binding to such an ID asynchronously
+     * triggers `Camera2CameraImpl.onConfigureFailed` and CameraX reports it
+     * as `IllegalStateException: onConfigureFailed`, which we cannot catch
+     * because it is raised on CameraX's internal SequencerExecutor. The only
+     * safe defense is to filter phantom IDs *before* the bind attempt.
+     *
+     * We additionally require the advertised size to clear
+     * [MIN_PHANTOM_AREA_PX]; some HALs claim a non-empty size table while
+     * the only entry is a 1×1 (or otherwise impractically small) placeholder,
+     * which CameraX still tries to bind and fails on async.
+     */
+    private fun hasUsablePreviewStream(characteristics: CameraCharacteristics): Boolean {
+        return try {
+            val configMap = characteristics.get(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+            ) ?: return false
+            val yuvSizes = configMap.getOutputSizes(android.graphics.ImageFormat.YUV_420_888)
+                ?: return false
+            yuvSizes.any { it.width * it.height >= MIN_PHANTOM_AREA_PX }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**
