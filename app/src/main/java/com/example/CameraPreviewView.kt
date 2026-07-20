@@ -224,7 +224,7 @@ fun CameraPreviewView(
     val imageCapture = remember {
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
             .setTargetRotation(windowManager.defaultDisplay.rotation)
             .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
             .build()
