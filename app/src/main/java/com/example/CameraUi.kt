@@ -2005,7 +2005,7 @@ fun CameraActiveScreen(
                 },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        RetroCameraPreset.values().forEach { preset ->
+                        FilmPreset.values().forEach { preset ->
                             val selected = preset == activePreset
                             Row(
                                 modifier = Modifier
@@ -2037,12 +2037,7 @@ fun CameraActiveScreen(
                                         fontSize = 15.sp
                                     )
                                     Text(
-                                        text = buildString {
-                                            if (preset.tempOffset > 0) append("Warm") else if (preset.tempOffset < 0) append("Cool") else append("Neutral")
-                                            append(" · ")
-                                            val expStr = if (preset.exposureOffset > 0) "+${preset.exposureOffset}" else "${preset.exposureOffset}"
-                                            append("EV $expStr")
-                                        },
+                                        text = "3D LUT film profile",
                                         color = Color.Gray,
                                         fontSize = 12.sp
                                     )

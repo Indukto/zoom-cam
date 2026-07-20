@@ -13,6 +13,9 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.color.CubeLut
+import com.example.color.CubeLutParser
+import com.example.color.LutColorFilter
 import com.example.zoom.AspectRatio
 import com.example.zoom.CaptureExtension
 import com.example.zoom.FovMapper
@@ -37,16 +40,22 @@ data class ExifData(
     val iso: String = "--"
 )
 
-enum class RetroCameraPreset(
+/**
+ * A film profile backed by a 3D `.cube` LUT in `assets/`.
+ *
+ * The LUT defines the base color grade; the default slider values are applied
+ * on top of it when the preset is selected and remain user-adjustable.
+ */
+enum class FilmPreset(
     val displayName: String,
-    val tempOffset: Float,
-    val tintOffset: Float,
-    val exposureOffset: Float
+    val assetPath: String,
+    val defaultTemp: Float = 0f,
+    val defaultTint: Float = 0f,
+    val defaultExposure: Float = 0f
 ) {
-    CLASSIC_U("Classic U", 0.6f, 0.2f, 0.0f),
-    DQS("DQS", -0.8f, -0.4f, 0.2f),
-    INSTA_C("Insta C", 0.4f, 0.6f, 0.4f),
-    GR_D("GR D", 0.0f, -0.2f, -0.3f)
+    KODAK_PORTRA("Kodak Portra 160", "luts/kodak_portra_160_vc.cube"),
+    KODAK_BW("Kodak BW 400 CN", "luts/kodak_bw_400_cn.cube"),
+    POLAROID("Polaroid PX-680", "luts/polaroid_px-680.cube")
 }
 
 class CameraViewModel : ViewModel() {
@@ -83,8 +92,12 @@ class CameraViewModel : ViewModel() {
     private val _tint = MutableStateFlow(0f)
     val tint: StateFlow<Float> = _tint.asStateFlow()
 
-    private val _activePreset = MutableStateFlow(RetroCameraPreset.CLASSIC_U)
-    val activePreset: StateFlow<RetroCameraPreset> = _activePreset.asStateFlow()
+    private val _activePreset = MutableStateFlow(FilmPreset.KODAK_PORTRA)
+    val activePreset: StateFlow<FilmPreset> = _activePreset.asStateFlow()
+
+    // Lazily-parsed LUTs keyed by asset path. Parsed once on first use and
+    // reused for every subsequent capture that selects the same film.
+    private val cachedLuts = mutableMapOf<String, CubeLut>()
 
     private val _flashMode = MutableStateFlow(0)
     val flashMode: StateFlow<Int> = _flashMode.asStateFlow()
@@ -335,11 +348,28 @@ class CameraViewModel : ViewModel() {
     fun setExposure(value: Float) { _exposure.value = value.coerceIn(-3.0f, 3.0f) }
     fun setTemperature(value: Float) { _temperature.value = value.coerceIn(-2.0f, 2.0f) }
     fun setTint(value: Float) { _tint.value = value.coerceIn(-2.0f, 2.0f) }
-    fun setCameraPreset(preset: RetroCameraPreset) {
+    fun setCameraPreset(preset: FilmPreset) {
         _activePreset.value = preset
-        setTemperature(preset.tempOffset)
-        setTint(preset.tintOffset)
-        setExposure(preset.exposureOffset)
+        setTemperature(preset.defaultTemp)
+        setTint(preset.defaultTint)
+        setExposure(preset.defaultExposure)
+    }
+
+    /**
+     * Returns the parsed LUT for [preset], loading and caching it on first use.
+     * Returns null if the asset cannot be read (the pipeline then skips the
+     * LUT step and falls back to the manual color filters only).
+     */
+    private fun loadLut(context: Context, preset: FilmPreset): CubeLut? {
+        cachedLuts[preset.assetPath]?.let { return it }
+        return try {
+            val lut = CubeLutParser.parse(preset.assetPath, context)
+            cachedLuts[preset.assetPath] = lut
+            lut
+        } catch (e: Exception) {
+            Log.e("CameraViewModel", "Failed to load LUT ${preset.assetPath}", e)
+            null
+        }
     }
     fun toggleFlash() { _flashMode.value = (_flashMode.value + 1) % 3 }
     fun toggleCamera() {
@@ -633,8 +663,10 @@ class CameraViewModel : ViewModel() {
                         } catch (e: Exception) { Log.e("CameraViewModel", "Error zoom-box cropping", e); arCropped }
                     } else { arCropped }
 
-                    val processedBitmap = if (_temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f) {
-                        finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value)
+                    val currentLut = loadLut(context, _activePreset.value)
+                    val hasAdjustments = _temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f
+                    val processedBitmap = if (currentLut != null || hasAdjustments) {
+                        finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
                     } else { finalBitmap }
 
                     FileOutputStream(rawFile).use { out -> processedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out) }
@@ -822,12 +854,23 @@ class CameraViewModel : ViewModel() {
         }
     }
 
-    private fun Bitmap.applyRetroFilter(tempVal: Float, tintVal: Float, expVal: Float): Bitmap {
-        val w = this.width; val h = this.height
-        val output = Bitmap.createBitmap(w, h, this.config ?: Bitmap.Config.ARGB_8888)
+    private fun Bitmap.applyRetroFilter(
+        tempVal: Float,
+        tintVal: Float,
+        expVal: Float,
+        lut: CubeLut? = null
+    ): Bitmap {
+        // Step 0: 3D LUT color grade (applied first so manual temp/tint/
+        // exposure adjustments layer on top of the film look). Produces a new
+        // bitmap; the caller is responsible for recycling the source.
+        var source: Bitmap = if (lut != null) LutColorFilter.apply(this, lut) else this
+        val w = source.width; val h = source.height
+        val output = Bitmap.createBitmap(w, h, source.config ?: Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(output)
         val paint = android.graphics.Paint()
-        canvas.drawBitmap(this, 0f, 0f, paint)
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        if (lut != null && source !== this) { source.recycle() }
+        source = output
         if (expVal != 0f) {
             val offset = expVal * 20f
             paint.colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix(floatArrayOf(1f,0f,0f,0f,offset,0f,1f,0f,0f,offset,0f,0f,1f,0f,offset,0f,0f,0f,1f,0f)))
