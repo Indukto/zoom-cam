@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Application
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -13,7 +14,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.compose.runtime.Stable
 import com.example.color.CubeLut
@@ -68,7 +69,9 @@ enum class FilmPreset(
     POLAROID_669("Polaroid 669 ++", "luts/polaroid_669_++.cube")
 }
 
-class CameraViewModel : ViewModel() {
+class CameraViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val prefsRepo = UserPreferencesRepository(application)
 
     private val _selectedLensRole = MutableStateFlow(LensRole.PRIMARY)
     val selectedLensRole: StateFlow<LensRole> = _selectedLensRole.asStateFlow()
@@ -180,6 +183,21 @@ class CameraViewModel : ViewModel() {
         } catch (e: Exception) {
             Log.e("CameraViewModel", "Error loading shutter sound", e)
         }
+        loadPersistedSettings()
+    }
+
+    private fun loadPersistedSettings() {
+        val saved = prefsRepo.loadBlocking()
+        _rawModeEnabled.value = saved.rawModeEnabled
+        _aspectRatio.value = saved.aspectRatio
+        _activePreset.value = saved.activePreset
+        _flashMode.value = saved.flashMode
+        _showGridLines.value = saved.showGridLines
+        _selfTimerMode.value = saved.selfTimerMode
+        _doubleExposureActive.value = saved.doubleExposureActive
+        _isFrontCamera.value = saved.isFrontCamera
+        _activeExtension.value = saved.activeExtension
+        _selectedLensRole.value = saved.selectedLensRole
     }
 
     fun loadPhotos(context: Context) {
@@ -284,6 +302,7 @@ class CameraViewModel : ViewModel() {
         }
         Log.i("LensSwitch", "Auto-correct: ${current.name} not available → fallback to ${fallback.name}")
         _selectedLensRole.value = fallback
+        viewModelScope.launch { prefsRepo.saveSelectedLensRole(fallback) }
         // Mirror cycleLens(): bump the switch trigger so the CameraPreviewView
         // re-keys and the binding re-fires against the corrected role.
         _lensSwitchTrigger.value = _lensSwitchTrigger.value + 1
@@ -319,6 +338,7 @@ class CameraViewModel : ViewModel() {
         val nextRole = availableRoles[(currentIndex + 1) % availableRoles.size]
         Log.i("LensSwitch", "User switch: ${_selectedLensRole.value.name} → ${nextRole.name}")
         _selectedLensRole.value = nextRole
+        viewModelScope.launch { prefsRepo.saveSelectedLensRole(nextRole) }
         _lensSwitchTrigger.value = _lensSwitchTrigger.value + 1
         _digitalZoomRatio.value = 1.0f
         recalculateState()
@@ -328,6 +348,7 @@ class CameraViewModel : ViewModel() {
         _extensionsProbeDone.value = false
         _availableExtensions.value = setOf(CaptureExtension.NONE)
         _activeExtension.value = CaptureExtension.NONE
+        viewModelScope.launch { prefsRepo.saveActiveExtension(CaptureExtension.NONE) }
     }
 
     private fun recalculateState() {
@@ -373,6 +394,7 @@ class CameraViewModel : ViewModel() {
     fun setTint(value: Float) { _tint.value = value.coerceIn(-2.0f, 2.0f) }
     fun setCameraPreset(preset: FilmPreset) {
         _activePreset.value = preset
+        viewModelScope.launch { prefsRepo.saveActivePreset(preset) }
         setTemperature(preset.defaultTemp)
         setTint(preset.defaultTint)
         setExposure(preset.defaultExposure)
@@ -394,10 +416,14 @@ class CameraViewModel : ViewModel() {
             null
         }
     }
-    fun toggleFlash() { _flashMode.value = (_flashMode.value + 1) % 3 }
+    fun toggleFlash() {
+        _flashMode.value = (_flashMode.value + 1) % 3
+        viewModelScope.launch { prefsRepo.saveFlashMode(_flashMode.value) }
+    }
     fun toggleCamera() {
         val nowFront = !_isFrontCamera.value
         _isFrontCamera.value = nowFront
+        viewModelScope.launch { prefsRepo.saveIsFrontCamera(nowFront) }
         if (nowFront) {
             // The front camera is single-lens. Reset zoom-related state so
             // a back-camera zoom (boxScale < 0.99) doesn't carry into the
@@ -411,12 +437,22 @@ class CameraViewModel : ViewModel() {
         // reset values above stick), recomputes on rear transition.
         recalculateState()
     }
-    fun toggleGridLines() { _showGridLines.value = !_showGridLines.value }
+    fun toggleGridLines() {
+        _showGridLines.value = !_showGridLines.value
+        viewModelScope.launch { prefsRepo.saveShowGridLines(_showGridLines.value) }
+    }
     fun cycleSelfTimer() {
         _selfTimerMode.value = when (_selfTimerMode.value) { 0 -> 3; 3 -> 10; else -> 0 }
+        viewModelScope.launch { prefsRepo.saveSelfTimerMode(_selfTimerMode.value) }
     }
-    fun toggleDoubleExposure() { _doubleExposureActive.value = !_doubleExposureActive.value }
-    fun setAspectRatio(ratio: AspectRatio) { _aspectRatio.value = ratio }
+    fun toggleDoubleExposure() {
+        _doubleExposureActive.value = !_doubleExposureActive.value
+        viewModelScope.launch { prefsRepo.saveDoubleExposure(_doubleExposureActive.value) }
+    }
+    fun setAspectRatio(ratio: AspectRatio) {
+        _aspectRatio.value = ratio
+        viewModelScope.launch { prefsRepo.saveAspectRatio(ratio) }
+    }
     fun setSelectedPhoto(file: File?) { _selectedPhoto.value = file }
 
     fun toggleTemperatureSlider() {
@@ -444,15 +480,23 @@ class CameraViewModel : ViewModel() {
     fun toggleRawMode() {
         if (!_rawModeEnabled.value && !_rawAvailableForCurrentLens.value) return
         _rawModeEnabled.value = !_rawModeEnabled.value
+        viewModelScope.launch { prefsRepo.saveRawMode(_rawModeEnabled.value) }
         // RAW bypasses OEM extensions by design (extensions produce processed
         // JPEGs); force NONE while RAW is on so the two don't conflict.
-        if (_rawModeEnabled.value) _activeExtension.value = CaptureExtension.NONE
+        if (_rawModeEnabled.value) {
+            _activeExtension.value = CaptureExtension.NONE
+            viewModelScope.launch { prefsRepo.saveActiveExtension(CaptureExtension.NONE) }
+        }
     }
 
     fun setRawModeEnabled(enabled: Boolean) {
         if (enabled && !_rawAvailableForCurrentLens.value) return
         _rawModeEnabled.value = enabled
-        if (enabled) _activeExtension.value = CaptureExtension.NONE
+        viewModelScope.launch { prefsRepo.saveRawMode(enabled) }
+        if (enabled) {
+            _activeExtension.value = CaptureExtension.NONE
+            viewModelScope.launch { prefsRepo.saveActiveExtension(CaptureExtension.NONE) }
+        }
     }
 
     /**
@@ -462,8 +506,12 @@ class CameraViewModel : ViewModel() {
     fun setExtension(ext: CaptureExtension) {
         if (ext != CaptureExtension.NONE && ext !in _availableExtensions.value) return
         _activeExtension.value = ext
+        viewModelScope.launch { prefsRepo.saveActiveExtension(ext) }
         // Extensions produce processed output, so RAW is mutually exclusive.
-        if (ext != CaptureExtension.NONE) _rawModeEnabled.value = false
+        if (ext != CaptureExtension.NONE) {
+            _rawModeEnabled.value = false
+            viewModelScope.launch { prefsRepo.saveRawMode(false) }
+        }
     }
 
     fun cycleExtension() {
@@ -471,7 +519,11 @@ class CameraViewModel : ViewModel() {
         if (available.size <= 1) return
         val idx = available.indexOf(_activeExtension.value)
         _activeExtension.value = available[(idx + 1).mod(available.size)]
-        if (_activeExtension.value != CaptureExtension.NONE) _rawModeEnabled.value = false
+        viewModelScope.launch { prefsRepo.saveActiveExtension(_activeExtension.value) }
+        if (_activeExtension.value != CaptureExtension.NONE) {
+            _rawModeEnabled.value = false
+            viewModelScope.launch { prefsRepo.saveRawMode(false) }
+        }
     }
 
     /**
@@ -987,5 +1039,8 @@ class CameraViewModel : ViewModel() {
         return target
     }
 
-    override fun onCleared() { super.onCleared(); try { shutterSound.release() } catch (_: Exception) {} }
+    override fun onCleared() {
+        super.onCleared()
+        try { shutterSound.release() } catch (_: Exception) {}
+    }
 }
