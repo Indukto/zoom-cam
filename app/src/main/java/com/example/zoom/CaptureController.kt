@@ -12,6 +12,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.runtime.Stable
 import androidx.lifecycle.LifecycleOwner
 import java.io.File
 import java.text.SimpleDateFormat
@@ -38,6 +39,7 @@ class CaptureController(
         private const val TAG = "CaptureController"
     }
 
+    @Stable
     data class CaptureResult(
         val photoFile: File,
         val captureLensRole: LensRole,

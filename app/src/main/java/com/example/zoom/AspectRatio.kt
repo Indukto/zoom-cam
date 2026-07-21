@@ -1,5 +1,7 @@
 package com.example.zoom
 
+import androidx.compose.runtime.Stable
+
 /**
  * Photo capture aspect ratios. Each value carries the [heightToWidth] multiplier
  * that is used both to size the on-screen zoom-box and to crop the saved JPEG.
@@ -12,6 +14,7 @@ package com.example.zoom
  * Listed in display order so the UI can iterate [values] without an extra
  * display-name map.
  */
+@Stable
 enum class AspectRatio(val label: String, val heightToWidth: Float) {
     /** Standard sensor portrait — 3:4 landscape/portrait equivalent. */
     RATIO_4_3("4:3", 1.35f),

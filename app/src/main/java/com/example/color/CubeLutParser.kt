@@ -1,6 +1,7 @@
 package com.example.color
 
 import android.content.Context
+import androidx.compose.runtime.Stable
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
@@ -15,6 +16,7 @@ import java.io.InputStreamReader
  *
  * This matches the G'MIC / Adobe convention (R varies fastest, then G, then B).
  */
+@Stable
 data class CubeLut(
     val size: Int,
     val domainMin: FloatArray,

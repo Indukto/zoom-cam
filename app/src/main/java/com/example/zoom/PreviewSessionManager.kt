@@ -17,6 +17,7 @@ import androidx.camera.core.Preview
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.runtime.Stable
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.TimeUnit
 
@@ -32,6 +33,7 @@ import java.util.concurrent.TimeUnit
  * the capture requests so every still benefits from the device's high-quality
  * processing pipeline.
  */
+@Stable
 data class BindResult(
     val camera: Camera,
     val imageCapture: ImageCapture
@@ -45,6 +47,7 @@ data class BindResult(
  * is active the manual physical-lens routing is intentionally bypassed (the
  * extension owns the sensor). Modes unavailable on the device fall back to NONE.
  */
+@Stable
 enum class CaptureExtension(val mode: Int) {
     NONE(ExtensionMode.NONE),
     HDR(ExtensionMode.HDR),

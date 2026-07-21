@@ -1,8 +1,11 @@
 package com.example.zoom
 
+import androidx.compose.runtime.Stable
+
 /**
  * The role of a physical camera lens on the device.
  */
+@Stable
 enum class LensRole {
     ULTRA_WIDE,
     PRIMARY,
@@ -23,6 +26,7 @@ enum class LensRole {
  *           true on the main rear sensors of flagship devices; rarely on front
  *           or ultra-wide/tele. Used to gate the "RAW" capture mode per lens.
  */
+@Stable
 data class LensProfile(
     val role: LensRole,
     val logicalCameraId: String,

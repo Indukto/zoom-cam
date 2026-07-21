@@ -15,6 +15,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.runtime.Stable
 import com.example.color.CubeLut
 import com.example.color.CubeLutParser
 import com.example.color.LutColorFilter
@@ -39,6 +40,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@Stable
 data class ExifData(
     val focalLength: String = "--",
     val shutterSpeed: String = "--",
@@ -51,6 +53,7 @@ data class ExifData(
  * The LUT defines the base color grade; the default slider values are applied
  * on top of it when the preset is selected and remain user-adjustable.
  */
+@Stable
 enum class FilmPreset(
     val displayName: String,
     val assetPath: String,
@@ -209,12 +212,17 @@ class CameraViewModel : ViewModel() {
             file.isFile && file.extension.lowercase() in listOf("jpg", "jpeg", "dng")
 
         val privateFiles = privateDir?.listFiles(::isOurPhoto)?.toList() ?: emptyList()
+        // Targeted scan: only check the root and known subdirectories
+        // (RAW/) instead of walkTopDown() which traverses the entire tree.
         // runCatching guards against scoped-storage edge cases where the
-        // public tree exists but listFiles() refuses to descend it (some
-        // OEM ROM builds post-API-29). walkTopDown() also picks up DNGs in
-        // ZoomBoxCamera/RAW/ alongside the JPEGs in the root.
+        // public tree exists but listFiles() refuses to descend it.
         val publicFiles = runCatching {
-            publicRoot.walkTopDown().filter(::isOurPhoto).toList()
+            val rootFiles = publicRoot.listFiles(::isOurPhoto)?.toList() ?: emptyList()
+            val rawDir = File(publicRoot, "RAW")
+            val rawFiles = if (rawDir.isDirectory) {
+                rawDir.listFiles(::isOurPhoto)?.toList() ?: emptyList()
+            } else emptyList()
+            rootFiles + rawFiles
         }.getOrDefault(emptyList())
 
         // Public first, then private — distinctBy { it.name } keeps the

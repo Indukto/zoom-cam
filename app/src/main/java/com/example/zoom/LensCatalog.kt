@@ -5,6 +5,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.util.Log
 import android.util.SizeF
+import androidx.compose.runtime.Stable
 
 /**
  * Discovers and catalogs the physical camera lenses on the device at runtime.
@@ -36,6 +37,7 @@ class LensCatalog(private val context: Context) {
         private const val MIN_PHANTOM_AREA_PX = 320 * 240
     }
 
+    @Stable
     data class CatalogResult(
         val ultraWide: LensProfile?,
         val primary: LensProfile?,
