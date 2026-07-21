@@ -61,10 +61,32 @@ enum class FilmPreset(
     val assetPath: String,
     val defaultTemp: Float = 0f,
     val defaultTint: Float = 0f,
-    val defaultExposure: Float = 0f
+    val defaultExposure: Float = 0f,
+    /**
+     * Film-grain strength added on top of the LUT at save time, in [0, 1].
+     * 0 = no grain (color negatives / polaroids where the LUT is the look).
+     * Non-zero is reserved for stocks with a distinctive silver-halide tooth.
+     * Currently only the KODAK_BW chromogenic B&W negative gets it — its
+     * mono output is famously grainy and the missing texture is what makes
+     * shots look "digitally desaturated" without this knob set.
+     */
+    val defaultGrainStrength: Float = 0f,
+    /**
+     * Per-channel chromatic grain fraction in [0, 1] (R, G, B independent
+     * noise samples mixed into the monochrome delta). 0 = strictly achromatic
+     * grain (B&W negatives, where any chroma speckle looks wrong against the
+     * paper response). Higher values introduce colored "dye cloud" speckles,
+     * useful if a future color stock preset wants a Portra-style organic grain.
+     */
+    val defaultGrainChroma: Float = 0f
 ) {
     KODAK_PORTRA("Kodak Portra 160", "luts/kodak_portra_160_vc.cube"),
-    KODAK_BW("Kodak BW 400 CN", "luts/kodak_bw_400_cn.cube"),
+    KODAK_BW(
+        "Kodak BW 400 CN",
+        "luts/kodak_bw_400_cn.cube",
+        defaultGrainStrength = 0.32f,
+        defaultGrainChroma = 0f  // strict mono — chroma speckles would look wrong on B&W
+    ),
     POLAROID("Polaroid PX-680", "luts/polaroid_px-680.cube"),
     KODAK_ELITE_100_XPRO("Kodak Elite 100 XPro", "luts/kodak_elite_100_xpro.cube"),
     POLAROID_669("Polaroid 669 ++", "luts/polaroid_669_++.cube")
@@ -795,9 +817,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 val currentLut = loadLut(context, _activePreset.value)
+                val preset = _activePreset.value
                 val hasAdjustments = _temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f
-                if (currentLut != null || hasAdjustments) {
-                    val filtered = finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
+                if (currentLut != null || hasAdjustments || preset.defaultGrainStrength > 0f) {
+                    val filtered = finalBitmap.applyRetroFilter(
+                        _temperature.value,
+                        _tint.value,
+                        _exposure.value,
+                        lut = currentLut,
+                        grainStrength = preset.defaultGrainStrength,
+                        grainChroma = preset.defaultGrainChroma
+                    )
                     if (filtered !== finalBitmap) {
                         finalBitmap.recycle()
                         finalBitmap = filtered
@@ -932,7 +962,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         tempVal: Float,
         tintVal: Float,
         expVal: Float,
-        lut: CubeLut? = null
+        lut: CubeLut? = null,
+        grainStrength: Float = 0f,
+        grainChroma: Float = 0f
     ): Bitmap {
         val w = this.width
         val h = this.height
@@ -1035,6 +1067,88 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                             }
                         }
 
+                        if (grainStrength > 0f) {
+                            // ── Realistic silver-halide film grain ────────────
+                            // Designed to match the optical model: silver halide
+                            // crystals in the emulsion are randomly distributed
+                            // on the film plane, develop proportional to local
+                            // exposure, and clump into a multi-scale distribution.
+                            // We approximate them with 2 octaves of cheap value
+                            // noise: a high-frequency octave for the grain
+                            // (~1 px grain diameter, like real silver grains
+                            // when the negative is scanned at 4000 dpi) and a
+                            // lower-frequency one for the clumping-the-grain-
+                            // into-clusters look that real negative scans show
+                            // ("wood-grain" texture at low magnification).
+                            //
+                            // Mono vs chroma: a B&W LUT (Kodak BW 400 CN is
+                            // chromogenic monochrome) desaturates the input on
+                            // its way through, so applying a STRICTLY achromatic
+                            // delta (same value to R, G, B) keeps the grain
+                            // looking like B&W paper grain rather than RGB sensor
+                            // noise. `grainChroma` re-introduces per-channel
+                            // offsets proportionally — useful for future color
+                            // stocks that want a Portra/dye-cloud look without
+                            // changing the algorithm.
+                            //
+                            // Luminance mask: real grain peaks in MIDTONES,
+                            // not shadows — at D-max (highlights) the silver is
+                            // fully developed so there's no room for exposure
+                            // variation, and at D-min (deep shadows) only a few
+                            // grains are exposed at all. Inverted parabola
+                            // peaking at luma 0.5. The floor clamp keeps real-film
+                            // base-fog grain alive in deep blacks (D-min).
+                            //
+                            // Per-pixel cost: 8 hash lookups on the mono path
+                            // (2 valueNoise2D calls × 4 lattice corners each),
+                            // +12 more when chroma is enabled (3 extra calls ×
+                            // 4 corners → 20 total). Runs inside the existing
+                            // 4-chunk parallel chunked coroutine pipeline so the
+                            // end-to-end capture time still hits the same ballpark.
+                            val lum = (r8 + g8 + b8) / 765f
+                            val midMask = 1f - 4f * (lum - 0.5f) * (lum - 0.5f) // [0, 1]
+                            val midMaskClamped = midMask.coerceAtLeast(0.4f)
+
+                            // Sum of two indep uniform samples centered at 0;
+                            // range [-1, 1), mean 0, approximately Gaussian by
+                            // the central limit theorem (variance ~1/6 per
+                            // octave, total ≈ N(0, ~1/3)).
+                            val fine = valueNoise2D(x * 1.05f, y * 1.05f)
+                            val medium = valueNoise2D(x * 0.32f + 31.7f, y * 0.32f + 17.3f)
+                            val monoCentered = (fine + medium) - 1f
+
+                            // Amplitude: at grainStrength = 0.32 (KODAK_BW),
+                            // peak grain ≈ 0.32 * (1.2 + 2.0) * 11 ≈ 11.3 of 255
+                            // (~4.4% in midtones), floor at the poles is
+                            // 0.32 * 1.2 * 11 ≈ 4.2 of 255 (~1.6% in deep
+                            // blacks/highlights — matching the look of scanned
+                            // 400 ISO 35 mm B&W negative shadow grain).
+                            val amp = grainStrength * (1.2f + 2.0f * midMaskClamped) * 11f
+                            val monoDelta = (monoCentered * amp).toInt()
+
+                            // Per-channel chromatic offsets — gated so we only
+                            // pay for the 3 extra hashes when a color-stock preset
+                            // opts in (currently none do; KODAK_BW is strict mono).
+                            // Locals avoid a per-pixel Triple<Int,Int,Int> allocation
+                            // on 12 MP saves (would otherwise produce ~12 M boxed
+                            // objects and noticeable GC pressure).
+                            var chromaR = 0
+                            var chromaG = 0
+                            var chromaB = 0
+                            if (grainChroma > 0f) {
+                                val cr = valueNoise2D(x * 1.13f + 7.1f, y * 1.13f + 3.7f)
+                                val cg = valueNoise2D(x * 0.97f + 91.3f, y * 0.97f + 47.2f)
+                                val cb = valueNoise2D(x * 1.21f + 13.4f, y * 1.21f + 71.9f)
+                                chromaR = ((cr - 0.5f) * amp * grainChroma).toInt()
+                                chromaG = ((cg - 0.5f) * amp * grainChroma).toInt()
+                                chromaB = ((cb - 0.5f) * amp * grainChroma).toInt()
+                            }
+
+                            r8 = (r8 + monoDelta + chromaR).toInt().coerceIn(0, 255)
+                            g8 = (g8 + monoDelta + chromaG).toInt().coerceIn(0, 255)
+                            b8 = (b8 + monoDelta + chromaB).toInt().coerceIn(0, 255)
+                        }
+
                         pixels[p] = (a shl 24) or (r8 shl 16) or (g8 shl 8) or b8
                         p++
                     }
@@ -1046,6 +1160,64 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
         if (lut != null) LutColorFilter.applyInPlace(target, lut)
         return target
+    }
+
+    /**
+     * MurmurHash-3 style 32-bit integer hash mixing two independent large
+     * primes (one per axis) into a single uniform random in [0, 1).
+     *
+     * Why two primes (and not `iy * 137` like the previous scheme): using a
+     * small prime for Y produces visible horizontal banding in the noise
+     * output because neighbouring rows hash to almost-the-same buckets.
+     * Two unrelated large primes decorrelate the axes so the grain looks
+     * like 2-D independent noise.
+     *
+     * Bit-width safety: Kotlin/JVM `Int` is signed and silently wraps on
+     * overflow — that's exactly what we want from a hash. Only the final
+     * `ushr` is critical (vs `shr`) so the sign bit never sneaks into the
+     * normalized float, otherwise half the pixels would receive negative
+     * "grain" deltas only.
+     */
+    private fun hash2D(x: Int, y: Int): Float {
+        var h = x * 0x27d4eb2d.toInt() xor y * 0x165667b1.toInt()
+        h = h xor (h ushr 13)
+        h *= 0x85ebca6b.toInt()
+        h = h xor (h ushr 16)
+        // 24-bit mantissa: enough resolution per pixel and never negative.
+        return ((h ushr 8) and 0xFFFFFF) / 16777216f
+    }
+
+    /**
+     * 2-D value (Perlin-like) noise. Returns a uniform random in [0, 1) with
+     * smooth interpolation between integer-lattice hash samples.
+     *
+     * Uses 5th-order smootherstep (`6x^5 - 15x^4 + 10x^3`) instead of the
+     * usual 3rd-order smoothstep: the smootherstep has zero 1st and 2nd
+     * derivatives at the lattice boundary, which kills the faint grid
+     * cells visible in cheaper interpolators (you can usually see them
+     * when zooming into generated Perlin noise — they read as soft
+     * checkerboard instead of pure noise).
+     *
+     * Per-call cost: 4 hash lookups + ~6 multiplies + ~6 adds. Called twice
+     * per grain pixel (fine + medium octaves) inside the parallel chunk
+     * loop, which already amortises the chunk start/coroutine overhead.
+     */
+    private fun valueNoise2D(x: Float, y: Float): Float {
+        val ix = x.toInt()
+        val iy = y.toInt()
+        val fx = x - ix
+        val fy = y - iy
+        val sx = fx * fx * fx * (fx * (fx * 6f - 15f) + 10f)
+        val sy = fy * fy * fy * (fy * (fy * 6f - 15f) + 10f)
+
+        val n00 = hash2D(ix, iy)
+        val n10 = hash2D(ix + 1, iy)
+        val n01 = hash2D(ix, iy + 1)
+        val n11 = hash2D(ix + 1, iy + 1)
+
+        val nx0 = n00 + (n10 - n00) * sx
+        val nx1 = n01 + (n11 - n01) * sx
+        return nx0 + (nx1 - nx0) * sy
     }
 
     override fun onCleared() {
