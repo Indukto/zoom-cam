@@ -1,0 +1,111 @@
+package com.example
+
+import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import com.example.zoom.AspectRatio
+import com.example.zoom.CaptureExtension
+import com.example.zoom.LensRole
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.runBlocking
+
+private val Context.settingsDataStore by preferencesDataStore("camera_settings")
+
+class UserPreferencesRepository(private val context: Context) {
+
+    companion object {
+        private val RAW_MODE = booleanPreferencesKey("raw_mode")
+        private val ASPECT_RATIO = stringPreferencesKey("aspect_ratio")
+        private val ACTIVE_PRESET = stringPreferencesKey("active_preset")
+        private val FLASH_MODE = intPreferencesKey("flash_mode")
+        private val SHOW_GRID_LINES = booleanPreferencesKey("show_grid_lines")
+        private val SELF_TIMER_MODE = intPreferencesKey("self_timer_mode")
+        private val DOUBLE_EXPOSURE = booleanPreferencesKey("double_exposure")
+        private val IS_FRONT_CAMERA = booleanPreferencesKey("is_front_camera")
+        private val ACTIVE_EXTENSION = stringPreferencesKey("active_extension")
+        private val SELECTED_LENS_ROLE = stringPreferencesKey("selected_lens_role")
+    }
+
+    data class Settings(
+        val rawModeEnabled: Boolean = false,
+        val aspectRatio: AspectRatio = AspectRatio.DEFAULT,
+        val activePreset: FilmPreset = FilmPreset.KODAK_PORTRA,
+        val flashMode: Int = 0,
+        val showGridLines: Boolean = false,
+        val selfTimerMode: Int = 0,
+        val doubleExposureActive: Boolean = false,
+        val isFrontCamera: Boolean = false,
+        val activeExtension: CaptureExtension = CaptureExtension.NONE,
+        val selectedLensRole: LensRole = LensRole.PRIMARY
+    )
+
+    val settingsFlow: Flow<Settings> = context.settingsDataStore.data.map { prefs ->
+        Settings(
+            rawModeEnabled = prefs[RAW_MODE] ?: false,
+            aspectRatio = prefs[ASPECT_RATIO]?.let { name ->
+                try { AspectRatio.valueOf(name) } catch (_: Exception) { AspectRatio.DEFAULT }
+            } ?: AspectRatio.DEFAULT,
+            activePreset = prefs[ACTIVE_PRESET]?.let { name ->
+                try { FilmPreset.valueOf(name) } catch (_: Exception) { FilmPreset.KODAK_PORTRA }
+            } ?: FilmPreset.KODAK_PORTRA,
+            flashMode = prefs[FLASH_MODE] ?: 0,
+            showGridLines = prefs[SHOW_GRID_LINES] ?: false,
+            selfTimerMode = prefs[SELF_TIMER_MODE] ?: 0,
+            doubleExposureActive = prefs[DOUBLE_EXPOSURE] ?: false,
+            isFrontCamera = prefs[IS_FRONT_CAMERA] ?: false,
+            activeExtension = prefs[ACTIVE_EXTENSION]?.let { name ->
+                try { CaptureExtension.valueOf(name) } catch (_: Exception) { CaptureExtension.NONE }
+            } ?: CaptureExtension.NONE,
+            selectedLensRole = prefs[SELECTED_LENS_ROLE]?.let { name ->
+                try { LensRole.valueOf(name) } catch (_: Exception) { LensRole.PRIMARY }
+            } ?: LensRole.PRIMARY
+        )
+    }
+
+    fun loadBlocking(): Settings = runBlocking { settingsFlow.first() }
+
+    suspend fun saveRawMode(enabled: Boolean) {
+        context.settingsDataStore.edit { it[RAW_MODE] = enabled }
+    }
+
+    suspend fun saveAspectRatio(ratio: AspectRatio) {
+        context.settingsDataStore.edit { it[ASPECT_RATIO] = ratio.name }
+    }
+
+    suspend fun saveActivePreset(preset: FilmPreset) {
+        context.settingsDataStore.edit { it[ACTIVE_PRESET] = preset.name }
+    }
+
+    suspend fun saveFlashMode(mode: Int) {
+        context.settingsDataStore.edit { it[FLASH_MODE] = mode }
+    }
+
+    suspend fun saveShowGridLines(enabled: Boolean) {
+        context.settingsDataStore.edit { it[SHOW_GRID_LINES] = enabled }
+    }
+
+    suspend fun saveSelfTimerMode(mode: Int) {
+        context.settingsDataStore.edit { it[SELF_TIMER_MODE] = mode }
+    }
+
+    suspend fun saveDoubleExposure(enabled: Boolean) {
+        context.settingsDataStore.edit { it[DOUBLE_EXPOSURE] = enabled }
+    }
+
+    suspend fun saveIsFrontCamera(isFront: Boolean) {
+        context.settingsDataStore.edit { it[IS_FRONT_CAMERA] = isFront }
+    }
+
+    suspend fun saveActiveExtension(ext: CaptureExtension) {
+        context.settingsDataStore.edit { it[ACTIVE_EXTENSION] = ext.name }
+    }
+
+    suspend fun saveSelectedLensRole(role: LensRole) {
+        context.settingsDataStore.edit { it[SELECTED_LENS_ROLE] = role.name }
+    }
+}

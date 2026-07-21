@@ -1,5 +1,6 @@
 package com.example
 
+import android.app.Application
 import android.content.Context
 import com.example.zoom.AspectRatio
 import androidx.compose.runtime.getValue
@@ -35,14 +36,14 @@ class ExampleRobolectricTest {
 
   @Test
   fun test_viewmodel_initial_states() {
-    val viewModel = CameraViewModel()
+    val viewModel = CameraViewModel(ApplicationProvider.getApplicationContext())
     assertFalse(viewModel.showGridLines.value)
     assertEquals(AspectRatio.RATIO_4_3, viewModel.aspectRatio.value)
   }
 
   @Test
   fun test_viewmodel_toggle_grid_lines() {
-    val viewModel = CameraViewModel()
+    val viewModel = CameraViewModel(ApplicationProvider.getApplicationContext())
     assertFalse(viewModel.showGridLines.value)
     viewModel.toggleGridLines()
     assertTrue(viewModel.showGridLines.value)
@@ -52,7 +53,7 @@ class ExampleRobolectricTest {
 
   @Test
   fun test_viewmodel_set_aspect_ratio() {
-    val viewModel = CameraViewModel()
+    val viewModel = CameraViewModel(ApplicationProvider.getApplicationContext())
     assertEquals(AspectRatio.RATIO_4_3, viewModel.aspectRatio.value)
     viewModel.setAspectRatio(AspectRatio.RATIO_1_1)
     assertEquals(AspectRatio.RATIO_1_1, viewModel.aspectRatio.value)
@@ -62,7 +63,7 @@ class ExampleRobolectricTest {
 
   @Test
   fun test_ui_settings_menu_interaction() {
-    val viewModel = CameraViewModel()
+    val viewModel = CameraViewModel(ApplicationProvider.getApplicationContext())
 
     composeTestRule.setContent {
       var showSettings by remember { mutableStateOf(false) }
@@ -105,7 +106,7 @@ class ExampleRobolectricTest {
     // _selectedLensRole. Locks in the front-camera guard so a future
     // refactor can't silently re-introduce the "13/24/116 cycle on selfie
     // mode" bug.
-    val viewModel = CameraViewModel()
+    val viewModel = CameraViewModel(ApplicationProvider.getApplicationContext())
     viewModel.toggleCamera()
     assertTrue(viewModel.isFrontCamera.value)
     val before = viewModel.selectedLensRole.value
