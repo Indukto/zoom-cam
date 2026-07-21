@@ -54,6 +54,7 @@ class LutPreviewRenderer(
     private var inputTexture = 0
     private var lutTexture = 0
     private var lutWidth = 0  // 0 == no LUT uploaded yet
+    private var has3dTextures = false  // false when GPU lacks GL_OES_texture_3D
 
     // --- Per-frame inputs ---
     private val stMatrix = FloatArray(16)
@@ -125,7 +126,15 @@ class LutPreviewRenderer(
     // GLSurfaceView.Renderer
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        // Detect 3D-texture support. The full FRAG_SHADER uses sampler3D;
+        // some emulator GPUs lack GL_OES_texture_3D. Fall back to a
+        // simpler shader (WB + exposure + vignette only) on those devices.
         program = createProgram(VERT_SHADER, FRAG_SHADER)
+        has3dTextures = program != 0
+        if (!has3dTextures) {
+            Log.w(TAG, "GL_OES_texture_3D not supported; LUT preview disabled")
+            program = createProgram(VERT_SHADER, FRAG_SHADER_NO_3D)
+        }
         require(program != 0) { "Failed to compile LUT preview program" }
 
         aPositionLoc = GLES20.glGetAttribLocation(program, "aPosition")
@@ -212,12 +221,14 @@ class LutPreviewRenderer(
         GLES20.glUniform1f(uExposureLoc, exposure)
         GLES20.glUniform2f(uViewSizeLoc, viewWidth.toFloat(), viewHeight.toFloat())
 
-        if (lutEnabled && lutWidth > 0) {
+        if (has3dTextures && lutEnabled && lutWidth > 0) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
             GLES20.glBindTexture(GLES30.GL_TEXTURE_3D, lutTexture)
             GLES20.glUniform1i(uLutLoc, 1)
+            GLES20.glUniform1i(uLutEnabledLoc, 1)
+        } else {
+            GLES20.glUniform1i(uLutEnabledLoc, 0)
         }
-        GLES20.glUniform1i(uLutEnabledLoc, if (lutEnabled && lutWidth > 0) 1 else 0)
 
         quadPositionBuf().position(0)
         GLES20.glEnableVertexAttribArray(aPositionLoc)
@@ -248,6 +259,7 @@ class LutPreviewRenderer(
     // Internals
 
     private fun uploadLut(lut: CubeLut) {
+        if (!has3dTextures) return  // GPU doesn't support 3D textures
         // Convert float RGB samples to 8-bit (the camera input is 8-bit anyway).
         val n = lut.size
         val buf = ByteBuffer.allocateDirect(n * n * n * 3).order(ByteOrder.nativeOrder())
@@ -420,10 +432,10 @@ class LutPreviewRenderer(
             }
         """
 
-            // Fragment shader: sample camera → apply WB + exposure + vignette + optional LUT.
+        // Fragment shader: sample camera → apply WB + exposure + vignette + optional LUT.
         // Uses GL_OES_EGL_image_external for the camera texture and
-        // GL_OES_texture_3D for the LUT (both universal on minSdk 24).
-        // Vignette math matches the CPU applyRetroFilter RadialGradient.
+        // GL_OES_texture_3D for the LUT. Vignette math matches the CPU
+        // applyRetroFilter RadialGradient.
         private const val FRAG_SHADER = """
             #extension GL_OES_EGL_image_external : require
             #extension GL_OES_texture_3D : enable
@@ -471,6 +483,50 @@ class LutPreviewRenderer(
                 if (uLutEnabled == 1) {
                     c = texture3D(uLut, c).rgb;
                 }
+                gl_FragColor = vec4(c, 1.0);
+            }
+        """
+
+        // Fallback fragment shader for GPUs that lack GL_OES_texture_3D
+        // (e.g. some Android Emulator GPU profiles). Identical to
+        // FRAG_SHADER except the 3D LUT stage is removed entirely —
+        // only WB + exposure + vignette are applied.
+        private const val FRAG_SHADER_NO_3D = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            uniform samplerExternalOES uTexture;
+            uniform float uTemperature;
+            uniform float uTint;
+            uniform float uExposure;
+            uniform vec2 uViewSize;
+            varying vec2 vTexCoord;
+
+            void main() {
+                vec3 c = texture2D(uTexture, vTexCoord).rgb;
+
+                // White balance — temp (warm/cool) and tint (green/magenta).
+                c.r += uTemperature * 0.04;
+                c.b -= uTemperature * 0.04;
+                c.g -= uTint * 0.04;
+                c.r += uTint * 0.02;
+                c.b += uTint * 0.02;
+                c = clamp(c, 0.0, 1.0);
+
+                // Exposure — stops-ish scaling.
+                c *= pow(2.0, uExposure * 0.4);
+                c = clamp(c, 0.0, 1.0);
+
+                // Vignette — matches CPU RadialGradient.
+                vec2 center = uViewSize * 0.5;
+                float dist = distance(gl_FragCoord.xy, center);
+                float maxRadius = 0.72 * max(uViewSize.x, uViewSize.y);
+                float t = (dist / maxRadius - 0.55) / 0.45;
+                t = clamp(t, 0.0, 1.0);
+                float shaderA = t * (135.0 / 255.0);
+                float invA = 1.0 - shaderA;
+                float cornerContrib = t * (12.0 / 255.0) * shaderA;
+                c.rgb = c.rgb * invA + vec3(cornerContrib);
+
                 gl_FragColor = vec4(c, 1.0);
             }
         """
