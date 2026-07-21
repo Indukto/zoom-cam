@@ -4,7 +4,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.media.MediaActionSound
 import android.media.ExifInterface
 import android.os.Build
@@ -24,6 +26,9 @@ import com.example.zoom.LensRole
 import com.example.zoom.PreviewSessionManager
 import com.example.zoom.RawCapture
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -587,195 +592,157 @@ class CameraViewModel : ViewModel() {
         _isCapturing.value = true
         val currentAspectRatioMultiplier = _aspectRatio.value.heightToWidth
         viewModelScope.launch(Dispatchers.IO) {
-            try {                val originalBitmap = BitmapFactory.decodeFile(
-                    rawFile.absolutePath,
-                    BitmapFactory.Options().apply { inMutable = true }
-                )
+            try {
+                var originalExposureTime = 0.0
+                var originalIso = 0
+                var exifOrientation = ExifInterface.ORIENTATION_NORMAL
+                try {
+                    val e = ExifInterface(rawFile.absolutePath)
+                    originalExposureTime = e.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0)
+                    originalIso = e.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
+                    exifOrientation = e.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                } catch (e: Exception) { Log.e("CameraViewModel", "Error reading original EXIF", e) }
 
-                if (originalBitmap != null) {
-                    // Read EXIF metadata from the original rawFile before any
-                    // rewrite touches it (we re-write the same fields onto the
-                    // saved copy).
-                    var originalExposureTime = 0.0
-                    var originalIso = 0
-                    try {
-                        val origExif = ExifInterface(rawFile.absolutePath)
-                        originalExposureTime = origExif.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, 0.0)
-                        originalIso = origExif.getAttributeInt(ExifInterface.TAG_ISO_SPEED_RATINGS, 0)
-                    } catch (e: Exception) { Log.e("CameraViewModel", "Error reading original EXIF", e) }
+                val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(rawFile.absolutePath, opts)
+                val origW = opts.outWidth
+                val origH = opts.outHeight
+                if (origW <= 0 || origH <= 0) return@launch
 
-                    // ─── Stage 0: normalize orientation FIRST ────────────────────
-                    // An earlier rewrite deferred the EXIF rotation into the
-                    // final Bitmap.createBitmap(..., matrix, true) call while
-                    // computing crop coords in pre-rotation source space. That
-                    // produced two visible regressions on saved JPEGs:
-                    //   1. EXIF double-rotation — pixels were rotated via the
-                    //      matrix and the EXIF tag was left pointing at the
-                    //      same rotation, so galleries applied it twice (the
-                    //      common ROTATE_90 case → 180° flip on display).
-                    //   2. Wrong AR-crop axis — curW/curH were the
-                    //      pre-rotation dims, so a 90° rotation dropped the
-                    //      aspect-ratio crop onto the wrong side of the image
-                    //      (a 4:3 sensor with RATIO_4_3 cropped the width to
-                    //      2238 px even though the output ends up portrait,
-                    //      leaving a noticeably squashed final photo).
-                    //
-                    // Fix: bake the EXIF rotation + selfie flip into a
-                    // display-natural bitmap up front, then run all three
-                    // crop stages against post-rotation coords so the math
-                    // projects onto the axes the user actually sees. Cost: 1
-                    // extra Bitmap alloc (~80 ms at 12 MP), still −2 fewer
-                    // allocations than the original pre-rewrite pipeline.
-                    val combinedMatrix = Matrix()
-                    try {
-                        val exif = ExifInterface(rawFile.absolutePath)
-                        when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                            ExifInterface.ORIENTATION_ROTATE_90 -> combinedMatrix.postRotate(90f)
-                            ExifInterface.ORIENTATION_ROTATE_180 -> combinedMatrix.postRotate(180f)
-                            ExifInterface.ORIENTATION_ROTATE_270 -> combinedMatrix.postRotate(270f)
-                            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> combinedMatrix.postScale(-1f, 1f)
-                            ExifInterface.ORIENTATION_FLIP_VERTICAL -> combinedMatrix.postScale(1f, -1f)
-                            ExifInterface.ORIENTATION_TRANSPOSE -> { combinedMatrix.postRotate(90f); combinedMatrix.postScale(-1f, 1f) }
-                            ExifInterface.ORIENTATION_TRANSVERSE -> { combinedMatrix.postRotate(270f); combinedMatrix.postScale(-1f, 1f) }
-                        }
-                    } catch (e: Exception) { Log.e("CameraViewModel", "Error reading EXIF orientation", e) }
-                    if (_isFrontCamera.value) combinedMatrix.postScale(-1f, 1f)
+                val (rotW, rotH) = when (exifOrientation) {
+                    ExifInterface.ORIENTATION_ROTATE_90, ExifInterface.ORIENTATION_ROTATE_270 -> origH to origW
+                    else -> origW to origH
+                }
+
+                var curX = 0; var curY = 0; var curW = rotW; var curH = rotH
+
+                if (captureLensNativeFocalMm != null) {
+                    val cropFactor = (captureLensNativeFocalMm / captureFocalLength).coerceIn(0f, 1f)
+                    if (cropFactor < 0.99f) {
+                        val cropW = (curW * cropFactor).toInt().coerceAtLeast(1)
+                        val cropH = (curH * cropFactor).toInt().coerceAtLeast(1)
+                        curX = (curW - cropW) / 2; curY = (curH - cropH) / 2
+                        curW = cropW; curH = cropH
+                    }
+                }
+
+                val arTargetRatio = 1f / currentAspectRatioMultiplier
+                val arActualRatio = curW.toFloat() / curH.toFloat()
+                if (kotlin.math.abs(arActualRatio - arTargetRatio) >= 0.02f) {
+                    if (arActualRatio > arTargetRatio) {
+                        val targetW = (curH * arTargetRatio).toInt().coerceIn(1, curW)
+                        curX += (curW - targetW) / 2; curW = targetW
+                    } else {
+                        val targetH = (curW / arTargetRatio).toInt().coerceIn(1, curH)
+                        curY += (curH - targetH) / 2; curH = targetH
+                    }
+                }
+
+                if (captureLensNativeFocalMm == null && boxWidthFraction < 0.99f) {
+                    val wScreen = screenWidth; val hScreen = screenHeight
+                    val arW = curW.toFloat(); val arH = curH.toFloat()
+                    val scale = kotlin.math.max(wScreen / arW, hScreen / arH)
+                    val wVisible = wScreen / scale; val hVisible = hScreen / scale
+                    val xVisibleStart = (arW - wVisible) / 2f; val yVisibleStart = (arH - hVisible) / 2f
+                    val wBox = wScreen * boxWidthFraction; val hBox = wBox * currentAspectRatioMultiplier
+                    val xBox = (wScreen - wBox) / 2f; val yBox = (hScreen - hBox) / 2f
+                    val xCrop = (xVisibleStart + (xBox / wScreen) * wVisible).toInt().coerceIn(0, curW - 1)
+                    val yCrop = (yVisibleStart + (yBox / hScreen) * hVisible).toInt().coerceIn(0, curH - 1)
+                    val wCrop = ((wBox / wScreen) * wVisible).toInt().coerceIn(1, curW - xCrop)
+                    val hCrop = ((hBox / hScreen) * hVisible).toInt().coerceIn(1, curH - yCrop)
+                    curX += xCrop; curY += yCrop; curW = wCrop; curH = hCrop
+                }
+
+                val cropArea = curW.toLong() * curH.toLong()
+                val fullArea = rotW.toLong() * rotH.toLong()
+
+                val finalBitmap: Bitmap
+                if (cropArea < fullArea * 9 / 10) {
+                    val (srcL, srcT, srcR, srcB) = when (exifOrientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 ->
+                            intArrayOf(curY, origH - curX - curW, curY + curH, origH - curX)
+                        ExifInterface.ORIENTATION_ROTATE_180 ->
+                            intArrayOf(origW - curX - curW, origH - curY - curH, origW - curX, origH - curY)
+                        ExifInterface.ORIENTATION_ROTATE_270 ->
+                            intArrayOf(origW - curY - curH, curX, origW - curY, curX + curW)
+                        else ->
+                            intArrayOf(curX, curY, curX + curW, curY + curH)
+                    }
+                    val decoder = BitmapRegionDecoder.newInstance(rawFile.absolutePath, false)
+                    val regionBitmap = decoder.decodeRegion(Rect(srcL, srcT, srcR, srcB), null)
+                    decoder.recycle()
+
+                    val matrix = Matrix()
+                    when (exifOrientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                    }
+                    if (_isFrontCamera.value) matrix.postScale(-1f, 1f)
+
+                    finalBitmap = if (matrix.isIdentity) regionBitmap
+                    else {
+                        val rotated = Bitmap.createBitmap(regionBitmap, 0, 0, regionBitmap.width, regionBitmap.height, matrix, true)
+                        if (rotated !== regionBitmap) regionBitmap.recycle()
+                        rotated
+                    }
+                } else {
+                    val originalBitmap = BitmapFactory.decodeFile(rawFile.absolutePath,
+                        BitmapFactory.Options().apply { inMutable = true }) ?: return@launch
+
+                    val matrix = Matrix()
+                    when (exifOrientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                        ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.postRotate(90f); matrix.postScale(-1f, 1f) }
+                        ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.postRotate(270f); matrix.postScale(-1f, 1f) }
+                    }
+                    if (_isFrontCamera.value) matrix.postScale(-1f, 1f)
 
                     val normalizedBitmap = try {
-                        if (combinedMatrix.isIdentity) {
-                            // Fast path for the common rear-camera + EXIF
-                            // NORMAL case: no extra alloc, no per-pixel
-                            // transform pipeline — just hand back the source.
-                            originalBitmap
-                        } else {
-                            Bitmap.createBitmap(originalBitmap, 0, 0, originalBitmap.width, originalBitmap.height, combinedMatrix, true)
-                        }
-                    } catch (e: Exception) {
-                        Log.e("CameraViewModel", "Error in normalize+rotate", e)
-                        originalBitmap
-                    }
+                        if (matrix.isIdentity) originalBitmap
+                        else Bitmap.createBitmap(originalBitmap, 0, 0, originalBitmap.width, originalBitmap.height, matrix, true)
+                    } catch (e: Exception) { originalBitmap }
                     if (normalizedBitmap !== originalBitmap) originalBitmap.recycle()
 
-                    // ─── Stage 1: lens-based digital zoom (digital tele) ───────
-                    // Crop coords are now in post-rotation (display-natural)
-                    // space. AspectRatio.heightToWidth is a portrait h/w ratio,
-                    // so the post-rotation source dims already match the
-                    // user's portrait grip and AR crops project onto the right
-                    // axes.
-                    var curX = 0
-                    var curY = 0
-                    var curW = normalizedBitmap.width
-                    var curH = normalizedBitmap.height
-                    if (captureLensNativeFocalMm != null) {
-                        val cropFactor = (captureLensNativeFocalMm / captureFocalLength).coerceIn(0f, 1f)
-                        if (cropFactor < 0.99f) {
-                            val cropW = (curW * cropFactor).toInt().coerceAtLeast(1)
-                            val cropH = (curH * cropFactor).toInt().coerceAtLeast(1)
-                            curX = (curW - cropW) / 2
-                            curY = (curH - cropH) / 2
-                            curW = cropW
-                            curH = cropH
-                        }
-                    }
-
-                    // ─── Stage 2: aspect-ratio crop (ALWAYS) ────────────────────
-                    // Trim the longer axis so w/h = 1/currentAspectRatioMultiplier.
-                    val arTargetRatio = 1f / currentAspectRatioMultiplier
-                    val arActualRatio = curW.toFloat() / curH.toFloat()
-                    if (kotlin.math.abs(arActualRatio - arTargetRatio) >= 0.02f) {
-                        if (arActualRatio > arTargetRatio) {
-                            val targetW = (curH * arTargetRatio).toInt().coerceIn(1, curW)
-                            curX += (curW - targetW) / 2
-                            curW = targetW
-                        } else {
-                            val targetH = (curW / arTargetRatio).toInt().coerceIn(1, curH)
-                            curY += (curH - targetH) / 2
-                            curH = targetH
-                        }
-                    }
-
-                    // ─── Stage 3: live zoom-box crop ────────────────────────────
-                    // Only when no native lens crop AND box is zoomed in. Maps
-                    // the viewfinder viewport + box fraction back into
-                    // source-coord space.
-                    if (captureLensNativeFocalMm == null && boxWidthFraction < 0.99f) {
-                        val wScreen = screenWidth
-                        val hScreen = screenHeight
-                        val arW = curW.toFloat()
-                        val arH = curH.toFloat()
-                        val scale = kotlin.math.max(wScreen / arW, hScreen / arH)
-                        val wVisible = wScreen / scale
-                        val hVisible = hScreen / scale
-                        val xVisibleStart = (arW - wVisible) / 2f
-                        val yVisibleStart = (arH - hVisible) / 2f
-                        val wBox = wScreen * boxWidthFraction
-                        val hBox = wBox * currentAspectRatioMultiplier
-                        val xBox = (wScreen - wBox) / 2f
-                        val yBox = (hScreen - hBox) / 2f
-                        val xCrop = (xVisibleStart + (xBox / wScreen) * wVisible).toInt().coerceIn(0, curW - 1)
-                        val yCrop = (yVisibleStart + (yBox / hScreen) * hVisible).toInt().coerceIn(0, curH - 1)
-                        val wCrop = ((wBox / wScreen) * wVisible).toInt().coerceIn(1, curW - xCrop)
-                        val hCrop = ((hBox / hScreen) * hVisible).toInt().coerceIn(1, curH - yCrop)
-                        curX += xCrop
-                        curY += yCrop
-                        curW = wCrop
-                        curH = hCrop
-                    }
-
-                    // ─── Single allocation: rotate + flip + 3 crops at once ───
-                    // ─── Final allocation: pure crop on display-natural src ────
-                    // normalizedBitmap (produced at Stage 0) is already in
-                    // display-natural orientation, so no further transform is
-                    // needed — the matrix-less overload below avoids the
-                    // per-pixel transform pipeline that would be wasted work.
-                    val finalBitmap = try {
+                    finalBitmap = try {
                         Bitmap.createBitmap(normalizedBitmap, curX, curY, curW, curH)
                     } catch (e: Exception) {
                         Log.e("CameraViewModel", "Error in final crop", e)
                         normalizedBitmap
                     }
                     if (finalBitmap !== normalizedBitmap) normalizedBitmap.recycle()
-
-                    // In-place LUT + temp + tint + exposure + vignette in a
-                    // single pixel loop. Replaces 4\u20135 separate Canvas
-                    // re-renders (each fully redrawing the bitmap into a new
-                    // backing) plus the LUT's separate outer getPixels/setPixels
-                    // round-trip. See [applyRetroFilter].
-                    val currentLut = loadLut(context, _activePreset.value)
-                    val hasAdjustments = _temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f
-                    if (currentLut != null || hasAdjustments) {
-                        finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
-                    }
-
-                    FileOutputStream(rawFile).use { out -> finalBitmap.compress(Bitmap.CompressFormat.JPEG, 97, out) }
-                    finalBitmap.recycle()
-
-                    val focalDir = rawFile.parentFile
-                    val focalName = rawFile.nameWithoutExtension
-                    val focalExt = rawFile.extension
-                    val newName = "${focalName}_${captureFocalLength}mm.$focalExt"
-                    val renamedFile = File(focalDir, newName)
-                    rawFile.renameTo(renamedFile)
-
-                    try {
-                        val exifOut = ExifInterface(renamedFile.absolutePath)
-                        if (originalExposureTime > 0.0) { exifOut.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, originalExposureTime.toString()) }
-                        if (originalIso > 0) { exifOut.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, originalIso.toString()) }
-                        exifOut.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "${captureFocalLength}.0")
-                        // The pixels already incorporate the EXIF rotation
-                        // (we baked it into normalizedBitmap at Stage 0), so
-                        // reset ORIENTATION to NORMAL — otherwise the gallery
-                        // would re-apply the rotation on top of already-rotated
-                        // pixels (a 180° misrender for the common ROTATE_90
-                        // case). Setting this unconditionally is safe because
-                        // the matrix stage normalized every capture to its
-                        // post-rotation form before any crop.
-                        exifOut.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                        exifOut.saveAttributes()
-                    } catch (e: Exception) { Log.e("CameraViewModel", "Error writing EXIF", e) }
-
-                    savePhotoToGallery(context, renamedFile)
                 }
+
+                val currentLut = loadLut(context, _activePreset.value)
+                val hasAdjustments = _temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f
+                if (currentLut != null || hasAdjustments) {
+                    finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
+                }
+
+                FileOutputStream(rawFile).use { out -> finalBitmap.compress(Bitmap.CompressFormat.JPEG, 97, out) }
+                finalBitmap.recycle()
+
+                val focalDir = rawFile.parentFile
+                val focalName = rawFile.nameWithoutExtension
+                val focalExt = rawFile.extension
+                val newName = "${focalName}_${captureFocalLength}mm.$focalExt"
+                val renamedFile = File(focalDir, newName)
+                rawFile.renameTo(renamedFile)
+
+                try {
+                    val exifOut = ExifInterface(renamedFile.absolutePath)
+                    if (originalExposureTime > 0.0) { exifOut.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, originalExposureTime.toString()) }
+                    if (originalIso > 0) { exifOut.setAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS, originalIso.toString()) }
+                    exifOut.setAttribute(ExifInterface.TAG_FOCAL_LENGTH, "${captureFocalLength}.0")
+                    exifOut.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                    exifOut.saveAttributes()
+                } catch (e: Exception) { Log.e("CameraViewModel", "Error writing EXIF", e) }
+
+                savePhotoToGallery(context, renamedFile)
                 loadPhotos(context)
             } catch (e: Exception) { Log.e("CameraViewModel", "Error processing photo", e) }
             finally { _isCapturing.value = false }
@@ -880,7 +847,7 @@ class CameraViewModel : ViewModel() {
             } catch (e: Exception) { Log.e("CameraViewModel", "Error deleting photo", e) }
         }
     }
-    private fun Bitmap.applyRetroFilter(
+    private suspend fun Bitmap.applyRetroFilter(
         tempVal: Float,
         tintVal: Float,
         expVal: Float,
@@ -925,55 +892,66 @@ class CameraViewModel : ViewModel() {
         val pixels = IntArray(w * h)
         getPixels(pixels, 0, w, 0, 0, w, h)
 
-        var p = 0
+        val numChunks = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
         val total = w * h
-        while (p < total) {
-            val x = p % w
-            val y = p / w
-            val dx = x - cx
+        val chunkSize = (total + numChunks - 1) / numChunks
 
-            val c = pixels[p]
-            val a = (c ushr 24) and 0xFF
-            var r8 = (c ushr 16) and 0xFF
-            var g8 = (c ushr 8) and 0xFF
-            var b8 = c and 0xFF
+        coroutineScope {
+            (0 until numChunks).map { chunk ->
+                val start = chunk * chunkSize
+                val end = (start + chunkSize).coerceAtMost(total)
+                async(Dispatchers.Default) {
+                    var p = start
+                    while (p < end) {
+                        val x = p % w
+                        val y = p / w
+                        val dx = x - cx
 
-            if (hasExp) {
-                r8 = (r8 * expScale).toInt().coerceIn(0, 255)
-                g8 = (g8 * expScale).toInt().coerceIn(0, 255)
-                b8 = (b8 * expScale).toInt().coerceIn(0, 255)
-            }
+                        val c = pixels[p]
+                        val a = (c ushr 24) and 0xFF
+                        var r8 = (c ushr 16) and 0xFF
+                        var g8 = (c ushr 8) and 0xFF
+                        var b8 = c and 0xFF
 
-            if (hasTemp) {
-                r8 = (r8 * tempInvA + tempR * tempA) / 255
-                g8 = (g8 * tempInvA + tempG * tempA) / 255
-                b8 = (b8 * tempInvA + tempB * tempA) / 255
-            }
+                        if (hasExp) {
+                            r8 = (r8 * expScale).toInt().coerceIn(0, 255)
+                            g8 = (g8 * expScale).toInt().coerceIn(0, 255)
+                            b8 = (b8 * expScale).toInt().coerceIn(0, 255)
+                        }
 
-            if (hasTint) {
-                r8 = (r8 * tintInvA + tintR * tintA) / 255
-                g8 = (g8 * tintInvA + tintG * tintA) / 255
-                b8 = (b8 * tintInvA + tintB * tintA) / 255
-            }
+                        if (hasTemp) {
+                            r8 = (r8 * tempInvA + tempR * tempA) / 255
+                            g8 = (g8 * tempInvA + tempG * tempA) / 255
+                            b8 = (b8 * tempInvA + tempB * tempA) / 255
+                        }
 
-            val distSq = dx * dx + rowDy2[y]
-            if (distSq > innerRadiusSq) {
-                val dist = kotlin.math.sqrt(distSq)
-                val radialT = (dist * maxRadiusInv - vigInner) / vigRange
-                if (radialT > 0f) {
-                    val clampedT = if (radialT > 1f) 1f else radialT
-                    val shaderA = clampedT * vigFadeMax
-                    val shaderC = clampedT * cornerRgb
-                    val invA = 1f - shaderA
-                    val cornerContrib = shaderC * shaderA
-                    r8 = (r8 * invA + cornerContrib).toInt().coerceIn(0, 255)
-                    g8 = (g8 * invA + cornerContrib).toInt().coerceIn(0, 255)
-                    b8 = (b8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                        if (hasTint) {
+                            r8 = (r8 * tintInvA + tintR * tintA) / 255
+                            g8 = (g8 * tintInvA + tintG * tintA) / 255
+                            b8 = (b8 * tintInvA + tintB * tintA) / 255
+                        }
+
+                        val distSq = dx * dx + rowDy2[y]
+                        if (distSq > innerRadiusSq) {
+                            val dist = kotlin.math.sqrt(distSq)
+                            val radialT = (dist * maxRadiusInv - vigInner) / vigRange
+                            if (radialT > 0f) {
+                                val clampedT = if (radialT > 1f) 1f else radialT
+                                val shaderA = clampedT * vigFadeMax
+                                val shaderC = clampedT * cornerRgb
+                                val invA = 1f - shaderA
+                                val cornerContrib = shaderC * shaderA
+                                r8 = (r8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                                g8 = (g8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                                b8 = (b8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                            }
+                        }
+
+                        pixels[p] = (a shl 24) or (r8 shl 16) or (g8 shl 8) or b8
+                        p++
+                    }
                 }
-            }
-
-            pixels[p] = (a shl 24) or (r8 shl 16) or (g8 shl 8) or b8
-            p++
+            }.awaitAll()
         }
 
         setPixels(pixels, 0, w, 0, 0, w, h)

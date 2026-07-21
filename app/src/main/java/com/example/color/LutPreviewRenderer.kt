@@ -48,8 +48,8 @@ class LutPreviewRenderer(
     private var uExposureLoc = 0
     private var uLutEnabledLoc = 0
     private var uLutLoc = 0
-    private var uAlphaMaskLoc = 0
     private var uTexCropLoc = 0
+    private var uViewSizeLoc = 0
 
     private var inputTexture = 0
     private var lutTexture = 0
@@ -138,6 +138,7 @@ class LutPreviewRenderer(
         uLutEnabledLoc = GLES20.glGetUniformLocation(program, "uLutEnabled")
         uLutLoc = GLES20.glGetUniformLocation(program, "uLut")
         uTexCropLoc = GLES20.glGetUniformLocation(program, "uTexCrop")
+        uViewSizeLoc = GLES20.glGetUniformLocation(program, "uViewSize")
 
         // Input (camera) texture.
         val tex = IntArray(1)
@@ -209,6 +210,7 @@ class LutPreviewRenderer(
         GLES20.glUniform1f(uTemperatureLoc, temperature)
         GLES20.glUniform1f(uTintLoc, tint)
         GLES20.glUniform1f(uExposureLoc, exposure)
+        GLES20.glUniform2f(uViewSizeLoc, viewWidth.toFloat(), viewHeight.toFloat())
 
         if (lutEnabled && lutWidth > 0) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
@@ -418,9 +420,10 @@ class LutPreviewRenderer(
             }
         """
 
-        // Fragment shader: sample camera → apply WB + exposure + optional LUT.
+            // Fragment shader: sample camera → apply WB + exposure + vignette + optional LUT.
         // Uses GL_OES_EGL_image_external for the camera texture and
         // GL_OES_texture_3D for the LUT (both universal on minSdk 24).
+        // Vignette math matches the CPU applyRetroFilter RadialGradient.
         private const val FRAG_SHADER = """
             #extension GL_OES_EGL_image_external : require
             #extension GL_OES_texture_3D : enable
@@ -432,13 +435,13 @@ class LutPreviewRenderer(
             uniform float uTint;
             uniform float uExposure;
             uniform int uLutEnabled;
+            uniform vec2 uViewSize;
             varying vec2 vTexCoord;
 
             void main() {
                 vec3 c = texture2D(uTexture, vTexCoord).rgb;
 
                 // White balance — temp (warm/cool) and tint (green/magenta).
-                // Same sign/feel as the existing capture-side retro filter.
                 c.r += uTemperature * 0.04;
                 c.b -= uTemperature * 0.04;
                 c.g += uTint * 0.04;
@@ -449,6 +452,19 @@ class LutPreviewRenderer(
                 // Exposure — stops-ish scaling.
                 c *= pow(2.0, uExposure * 0.4);
                 c = clamp(c, 0.0, 1.0);
+
+                // Vignette — matches CPU RadialGradient (TRANSPARENT → argb(135,12,12,12)
+                // at stops 0.55 and 1.0 of 0.72*max(w,h)). Uses gl_FragCoord pixel
+                // position so the effect is viewport-scaled, same as the CPU path.
+                vec2 center = uViewSize * 0.5;
+                float dist = distance(gl_FragCoord.xy, center);
+                float maxRadius = 0.72 * max(uViewSize.x, uViewSize.y);
+                float t = (dist / maxRadius - 0.55) / 0.45;
+                t = clamp(t, 0.0, 1.0);
+                float shaderA = t * (135.0 / 255.0);
+                float invA = 1.0 - shaderA;
+                float cornerContrib = t * (12.0 / 255.0) * shaderA;
+                c.rgb = c.rgb * invA + vec3(cornerContrib);
 
                 // 3D LUT. texture3D coords are normalized to [0,1]; the GPU's
                 // linear filtering gives trilinear interpolation for free.
