@@ -55,7 +55,9 @@ enum class FilmPreset(
 ) {
     KODAK_PORTRA("Kodak Portra 160", "luts/kodak_portra_160_vc.cube"),
     KODAK_BW("Kodak BW 400 CN", "luts/kodak_bw_400_cn.cube"),
-    POLAROID("Polaroid PX-680", "luts/polaroid_px-680.cube")
+    POLAROID("Polaroid PX-680", "luts/polaroid_px-680.cube"),
+    KODAK_ELITE_100_XPRO("Kodak Elite 100 XPro", "luts/kodak_elite_100_xpro.cube"),
+    POLAROID_669("Polaroid 669 ++", "luts/polaroid_669_++.cube")
 }
 
 class CameraViewModel : ViewModel() {
