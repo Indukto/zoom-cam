@@ -34,6 +34,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
@@ -94,7 +95,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _availableFocalLengths = MutableStateFlow<List<Float>>(listOf(24f, 77f))
     val availableFocalLengths: StateFlow<List<Float>> = _availableFocalLengths.asStateFlow()
 
-    private var lensCatalogResult: LensCatalog.CatalogResult? = null
+    var lensCatalogResult: LensCatalog.CatalogResult? = null
+        private set
 
     private val _exposure = MutableStateFlow(0f)
     val exposure: StateFlow<Float> = _exposure.asStateFlow()
@@ -175,29 +177,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _extensionsProbeDone = MutableStateFlow(false)
     val extensionsProbeDone: StateFlow<Boolean> = _extensionsProbeDone.asStateFlow()
 
-    private val shutterSound = MediaActionSound()
+    private var shutterSound: MediaActionSound? = null
 
     init {
-        try {
-            shutterSound.load(MediaActionSound.SHUTTER_CLICK)
-        } catch (e: Exception) {
-            Log.e("CameraViewModel", "Error loading shutter sound", e)
+        viewModelScope.launch {
+            prefsRepo.settingsFlow.first().let { saved ->
+                _rawModeEnabled.value = saved.rawModeEnabled
+                _aspectRatio.value = saved.aspectRatio
+                _activePreset.value = saved.activePreset
+                _flashMode.value = saved.flashMode
+                _showGridLines.value = saved.showGridLines
+                _selfTimerMode.value = saved.selfTimerMode
+                _doubleExposureActive.value = saved.doubleExposureActive
+                _isFrontCamera.value = saved.isFrontCamera
+                _activeExtension.value = saved.activeExtension
+                _selectedLensRole.value = saved.selectedLensRole
+            }
         }
-        loadPersistedSettings()
-    }
-
-    private fun loadPersistedSettings() {
-        val saved = prefsRepo.loadBlocking()
-        _rawModeEnabled.value = saved.rawModeEnabled
-        _aspectRatio.value = saved.aspectRatio
-        _activePreset.value = saved.activePreset
-        _flashMode.value = saved.flashMode
-        _showGridLines.value = saved.showGridLines
-        _selfTimerMode.value = saved.selfTimerMode
-        _doubleExposureActive.value = saved.doubleExposureActive
-        _isFrontCamera.value = saved.isFrontCamera
-        _activeExtension.value = saved.activeExtension
-        _selectedLensRole.value = saved.selectedLensRole
     }
 
     fun loadPhotos(context: Context) {
@@ -249,6 +245,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         return (publicFiles + privateFiles)
             .distinctBy { it.name }
             .sortedByDescending { it.lastModified() }
+    }
+
+    fun getCurrentLensProfile(): com.example.zoom.LensProfile? {
+        val catalog = lensCatalogResult ?: return null
+        return when (_selectedLensRole.value) {
+            com.example.zoom.LensRole.ULTRA_WIDE -> catalog.ultraWide
+            com.example.zoom.LensRole.PRIMARY -> catalog.primary
+            com.example.zoom.LensRole.TELE -> catalog.tele
+        }
     }
 
     fun setAvailableFocalLengths(lengths: List<Float>) {
@@ -571,7 +576,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playShutterSound() {
-        try { shutterSound.play(MediaActionSound.SHUTTER_CLICK) } catch (e: Exception) { Log.e("CameraViewModel", "Error playing shutter sound", e) }
+        val sound = shutterSound ?: MediaActionSound().also {
+            try { it.load(MediaActionSound.SHUTTER_CLICK) } catch (e: Exception) { Log.e("CameraViewModel", "Error loading shutter sound", e) }
+            shutterSound = it
+        }
+        try { sound.play(MediaActionSound.SHUTTER_CLICK) } catch (e: Exception) { Log.e("CameraViewModel", "Error playing shutter sound", e) }
     }
 
     /**
@@ -1041,6 +1050,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
-        try { shutterSound.release() } catch (_: Exception) {}
+        try { shutterSound?.release() } catch (_: Exception) {}
     }
 }

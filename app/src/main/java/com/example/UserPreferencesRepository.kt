@@ -12,7 +12,6 @@ import com.example.zoom.LensRole
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.runBlocking
 
 private val Context.settingsDataStore by preferencesDataStore("camera_settings")
 
@@ -66,8 +65,6 @@ class UserPreferencesRepository(private val context: Context) {
             } ?: LensRole.PRIMARY
         )
     }
-
-    fun loadBlocking(): Settings = runBlocking { settingsFlow.first() }
 
     suspend fun saveRawMode(enabled: Boolean) {
         context.settingsDataStore.edit { it[RAW_MODE] = enabled }

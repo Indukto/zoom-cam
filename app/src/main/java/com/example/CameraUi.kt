@@ -9,8 +9,10 @@ import androidx.compose.foundation.pager.rememberPagerState
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.core.content.ContextCompat
@@ -157,8 +159,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.rememberAsyncImagePainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.example.zoom.AspectRatio
+import com.example.color.CubeLut
 import com.example.zoom.CaptureExtension
-import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
@@ -895,6 +897,8 @@ fun CameraUi(
     val cameraPermissionState = rememberPermissionState(android.Manifest.permission.CAMERA)
 
     LaunchedEffect(Unit) {
+        // Small delay so gallery I/O doesn't compete with camera init
+        kotlinx.coroutines.delay(100)
         viewModel.loadPhotos(context)
     }
 
@@ -1247,8 +1251,11 @@ fun CameraActiveScreen(
     val activePreset by viewModel.activePreset.collectAsState()
 
     // Load the active preset's LUT for the live viewfinder GL shader.
-    val previewLut = remember(activePreset) {
-        viewModel.loadLut(context, activePreset)
+    var previewLut by remember { mutableStateOf<CubeLut?>(null) }
+    LaunchedEffect(activePreset) {
+        previewLut = withContext(Dispatchers.IO) {
+            viewModel.loadLut(context, activePreset)
+        }
     }
 
     val mainExecutor = ContextCompat.getMainExecutor(context)
@@ -1261,8 +1268,8 @@ fun CameraActiveScreen(
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     LaunchedEffect(selectedLensRole, isFrontCamera) {
         if (isFrontCamera) return@LaunchedEffect
-        // Resolve the logical camera id for the selected lens, then probe.
-        val catalog = LensCatalog(context).enumerate()
+        // Use the already-cached lens catalog instead of re-enumerating
+        val catalog = viewModel.lensCatalogResult ?: return@LaunchedEffect
         val targetProfile = when (selectedLensRole) {
             LensRole.ULTRA_WIDE -> catalog.ultraWide
             LensRole.PRIMARY -> catalog.primary
@@ -1723,13 +1730,9 @@ fun CameraActiveScreen(
         val doCapture: () -> Unit = {
             viewModel.playShutterSound()
             flashFlashActive = true
-            val catalog = LensCatalog(context)
-            val result = catalog.enumerate()
-            val currentLens = when (selectedLensRole) {
-                LensRole.ULTRA_WIDE -> result.ultraWide
-                LensRole.PRIMARY    -> result.primary
-                LensRole.TELE      -> result.tele
-            }
+            val currentLens = viewModel.getCurrentLensProfile()
+            val nativeFocalForCrop = if (selectedLensRole == LensRole.PRIMARY)
+                viewModel.lensCatalogResult?.primary?.equivFocalMm else null
             if (rawModeEnabled && currentLens != null) {
                 viewModel.captureAndSaveRaw(
                     context = context,
@@ -1740,8 +1743,6 @@ fun CameraActiveScreen(
             } else {
                 val captureDevice = activeImageCapture
                 if (captureDevice != null) {
-                    val isDigitalZoomActive = selectedLensRole == LensRole.PRIMARY
-                    val nativeFocalForCrop = if (isDigitalZoomActive) result.primary?.equivFocalMm else null
                     triggerImageCapture(
                         context = context,
                         imageCapture = captureDevice,

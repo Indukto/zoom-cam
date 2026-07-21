@@ -43,6 +43,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.example.color.CubeLut
 import com.example.color.CubeLutParser
 import com.example.color.LutPreviewView
@@ -264,8 +266,9 @@ fun CameraPreviewView(
     // row and the auto-correct-initial-lens logic.
     LaunchedEffect(Unit) {
         if (catalogHolder.value == null) {
-            val catalog = LensCatalog(context)
-            val result = catalog.enumerate()
+            val result = withContext(Dispatchers.IO) {
+                LensCatalog(context).enumerate()
+            }
             catalogHolder.value = result
             onAvailableFocalLengths(result.allLenses.map { it.equivFocalMm }.sorted())
             onLensCatalogReady?.invoke(result)
