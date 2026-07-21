@@ -444,9 +444,9 @@ class LutPreviewRenderer(
                 // White balance — temp (warm/cool) and tint (green/magenta).
                 c.r += uTemperature * 0.04;
                 c.b -= uTemperature * 0.04;
-                c.g += uTint * 0.04;
-                c.r -= uTint * 0.02;
-                c.b -= uTint * 0.02;
+                c.g -= uTint * 0.04;
+                c.r += uTint * 0.02;
+                c.b += uTint * 0.02;
                 c = clamp(c, 0.0, 1.0);
 
                 // Exposure — stops-ish scaling.

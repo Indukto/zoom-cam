@@ -869,21 +869,17 @@ class CameraViewModel : ViewModel() {
         val hasTemp = tempVal != 0f
         val hasTint = tintVal != 0f
 
+        // GPU-matched WB formulas (matching FRAG_SHADER in LutPreviewRenderer):
+        //   temp:  c.r += temp*0.04; c.b -= temp*0.04
+        //   tint:  c.g -= tint*0.04; c.r += tint*0.02; c.b += tint*0.02
+        // Precompute combined per-channel deltas in normalised [0,1] space
+        // so the per-pixel loop only does float add + multiply.
+        val wbActive = hasTemp || hasTint
+        val wbDeltaR = tempVal * 0.04f + tintVal * 0.02f
+        val wbDeltaG = -tintVal * 0.04f
+        val wbDeltaB = -tempVal * 0.04f + tintVal * 0.02f
+
         val expScale = if (hasExp) java.lang.Math.pow(2.0, (expVal * 0.4).toDouble()).toFloat() else 1f
-
-        val tempIsPos = tempVal > 0f
-        val tempR = if (hasTemp && tempIsPos) 245 else if (hasTemp) 14 else 0
-        val tempG = if (hasTemp && tempIsPos) 158 else if (hasTemp) 165 else 0
-        val tempB = if (hasTemp && tempIsPos) 11 else if (hasTemp) 233 else 0
-        val tempA = if (hasTemp) (kotlin.math.abs(tempVal) * 25f).toInt().coerceIn(0, 80) else 0
-        val tempInvA = 255 - tempA
-
-        val tintIsPos = tintVal > 0f
-        val tintR = if (hasTint && tintIsPos) 236 else if (hasTint) 34 else 0
-        val tintG = if (hasTint && tintIsPos) 72 else if (hasTint) 197 else 0
-        val tintB = if (hasTint && tintIsPos) 153 else if (hasTint) 94 else 0
-        val tintA = if (hasTint) (kotlin.math.abs(tintVal) * 25f).toInt().coerceIn(0, 80) else 0
-        val tintInvA = 255 - tintA
 
         val cx = w * 0.5f
         val cy = h * 0.5f
@@ -921,22 +917,31 @@ class CameraViewModel : ViewModel() {
                         var g8 = (c ushr 8) and 0xFF
                         var b8 = c and 0xFF
 
-                        if (hasExp) {
-                            r8 = (r8 * expScale).toInt().coerceIn(0, 255)
-                            g8 = (g8 * expScale).toInt().coerceIn(0, 255)
-                            b8 = (b8 * expScale).toInt().coerceIn(0, 255)
-                        }
+                        // GPU-matched pipeline: WB → Exp (matching FRAG_SHADER order).
+                        // Uses the same additive channel math as the GL preview shader.
+                        if (wbActive || hasExp) {
+                            var rf = r8 / 255f
+                            var gf = g8 / 255f
+                            var bf = b8 / 255f
 
-                        if (hasTemp) {
-                            r8 = (r8 * tempInvA + tempR * tempA) / 255
-                            g8 = (g8 * tempInvA + tempG * tempA) / 255
-                            b8 = (b8 * tempInvA + tempB * tempA) / 255
-                        }
+                            if (wbActive) {
+                                rf += wbDeltaR
+                                gf += wbDeltaG
+                                bf += wbDeltaB
+                                rf = rf.coerceIn(0f, 1f)
+                                gf = gf.coerceIn(0f, 1f)
+                                bf = bf.coerceIn(0f, 1f)
+                            }
 
-                        if (hasTint) {
-                            r8 = (r8 * tintInvA + tintR * tintA) / 255
-                            g8 = (g8 * tintInvA + tintG * tintA) / 255
-                            b8 = (b8 * tintInvA + tintB * tintA) / 255
+                            if (hasExp) {
+                                rf = (rf * expScale).coerceIn(0f, 1f)
+                                gf = (gf * expScale).coerceIn(0f, 1f)
+                                bf = (bf * expScale).coerceIn(0f, 1f)
+                            }
+
+                            r8 = (rf * 255f + 0.5f).toInt()
+                            g8 = (gf * 255f + 0.5f).toInt()
+                            b8 = (bf * 255f + 0.5f).toInt()
                         }
 
                         val distSq = dx * dx + rowDy2[y]
