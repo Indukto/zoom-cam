@@ -242,6 +242,9 @@ class CameraViewModel : ViewModel() {
 
     fun setLensCatalogResult(result: LensCatalog.CatalogResult) {
         lensCatalogResult = result
+        Log.i("LensSwitch", "Catalog loaded | UW=${result.ultraWide?.equivFocalMm}mm(${result.ultraWide?.physicalCameraId}) " +
+            "PRI=${result.primary?.equivFocalMm}mm(${result.primary?.physicalCameraId}) " +
+            "TELE=${result.tele?.equivFocalMm}mm(${result.tele?.physicalCameraId})")
         // The default _selectedLensRole is PRIMARY (24mm-ish). On devices
         // without a primary-class lens the initial preview stays black
         // because the binding fails silently. Auto-correct the initial
@@ -279,6 +282,7 @@ class CameraViewModel : ViewModel() {
             else -> return  // no back cameras; leave selection for the
                              // preview's DEFAULT_BACK_CAMERA path
         }
+        Log.i("LensSwitch", "Auto-correct: ${current.name} not available → fallback to ${fallback.name}")
         _selectedLensRole.value = fallback
         // Mirror cycleLens(): bump the switch trigger so the CameraPreviewView
         // re-keys and the binding re-fires against the corrected role.
@@ -305,11 +309,15 @@ class CameraViewModel : ViewModel() {
         // is defense-in-depth in case a future screen subscribes
         // directly to _selectedLensRole.
         if (_isFrontCamera.value) return
-        val nextRole = when (_selectedLensRole.value) {
-            LensRole.PRIMARY -> LensRole.ULTRA_WIDE
-            LensRole.ULTRA_WIDE -> LensRole.TELE
-            LensRole.TELE -> LensRole.PRIMARY
-        }
+        val catalog = lensCatalogResult
+        val availableRoles = mutableListOf<LensRole>()
+        if (catalog?.primary != null) availableRoles.add(LensRole.PRIMARY)
+        if (catalog?.ultraWide != null) availableRoles.add(LensRole.ULTRA_WIDE)
+        if (catalog?.tele != null) availableRoles.add(LensRole.TELE)
+        if (availableRoles.isEmpty()) return
+        val currentIndex = availableRoles.indexOf(_selectedLensRole.value)
+        val nextRole = availableRoles[(currentIndex + 1) % availableRoles.size]
+        Log.i("LensSwitch", "User switch: ${_selectedLensRole.value.name} → ${nextRole.name}")
         _selectedLensRole.value = nextRole
         _lensSwitchTrigger.value = _lensSwitchTrigger.value + 1
         _digitalZoomRatio.value = 1.0f

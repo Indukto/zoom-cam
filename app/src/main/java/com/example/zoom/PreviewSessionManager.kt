@@ -20,6 +20,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.runtime.Stable
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.delay
 
 /**
  * Manages the live preview session, handling lens transitions.
@@ -70,6 +71,13 @@ class PreviewSessionManager(
 
     companion object {
         private const val TAG = "PreviewSessionManager"
+
+        /**
+         * Retry delays (ms) between unbindAll() and bindToLifecycle() on
+         * lens switch. Tuned for Xiaomi/MediaTek V4L2 kernel-device-node
+         * teardown latency. Three attempts: 80 ms → 200 ms → 400 ms.
+         */
+        private val RETRY_DELAYS_MS = longArrayOf(80, 200, 400)
 
         /**
          * Cached ExtensionsManager. Resolved lazily and reused across binds;
@@ -180,7 +188,7 @@ class PreviewSessionManager(
      * @param extension OEM extension to apply (NONE = manual physical-lens path)
      * @return A BindResult containing the bound Camera and ImageCapture, or null on failure
      */
-    fun bindPreview(
+    suspend fun bindPreview(
         cameraProvider: ProcessCameraProvider,
         logicalCameraId: String,
         physicalCameraId: String,
@@ -252,83 +260,96 @@ class PreviewSessionManager(
         val previousImageCapture = currentImageCapture
         val previousLogicalCameraId = currentLogicalCameraId
 
-        return try {
-            // ───── unbindAll path ────────────────────────────────────────
-            // CameraX's `bindToLifecycle(selector, new...)` is NOT an atomic
-            // replace on devices that constrain the surface combination
-            // count (Xiaomi/MTK only advertises a single PRIV/PREVIEW slot
-            // and a single JPEG/STILL_CAPTURE slot). Selective `unbind()`
-            // is asynchronous on these HALs — the old surfaces aren't torn
-            // down before `bindToLifecycle` validates the combined set,
-            // causing "No supported surface combination" with 4 surfaces
-            // (2 existing + 2 new) where only 2 are supported.
-            //
-            // `unbindAll()` guarantees all surfaces are released before the
-            // new bind, at the cost of a brief black flash on lens switch.
-            cameraProvider.unbindAll()
-            val camera = cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                selector,
-                preview,
-                newImageCapture
-            )
-            currentPreview = preview
-            currentImageCapture = newImageCapture
-            currentLogicalCameraId = logicalCameraId
-            // bindPreview always targets a back-facing logical camera via
-            // its specific id. currentIsFrontCamera is left untouched
-            // here because recoverySelector() short-circuits on the
-            // non-null logical id; the field is preserved across the
-            // next bindDefaultCamera call in case the user toggles
-            // to/from front and we lose the id. The invariant that makes
-            // leaving this field alone safe is: bindDefaultCamera is the
-            // SOLE writer of currentIsFrontCamera, so any front↔back
-            // toggle overwrites it before binding could end up out of
-            // sync.
-            BindResult(camera, newImageCapture)
-        } catch (e: Exception) {
-            Log.e(
-                TAG,
-                "Error binding preview to physical=$physicalCameraId logical=$logicalCameraId",
-                e
-            )
-            // Restore the previous use cases on the same logical camera.
-            // This prevents the "switches back in a split second" symptom
-            // that happens when the fallback path (DEFAULT_BACK_CAMERA)
-            // picks the primary lens — the viewfinder stays on whatever
-            // the user was looking at, and they don't get the impression
-            // the app reverted.
-            //
-            // OEM extension state from the previous successful bind
-            // (HDR/NIGHT/BOKEH/AUTO) is deliberately NOT preserved here.
-            // Recovery treats the previous logical id as the only durable
-            // state; the user can re-select HDR/NIGHT/etc. manually from
-            // the UI. Rationale: rebuilding the extension selector adds
-            // an ExtensionsManager round-trip on every fallback, which is
-            // a worse trade than losing the (re-selectable) extension mode.
-            if (previousPreview != null && previousImageCapture != null) {
-                try {
-                    val restored = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        recoverySelector(),
-                        previousPreview,
-                        previousImageCapture
-                    )
-                    Log.w(
-                        TAG,
-                        "Recovered after failed bind; previous use cases restored " +
-                            "(logical=$previousLogicalCameraId, front=${currentIsFrontCamera})"
-                    )
-                    return BindResult(restored, previousImageCapture)
-                } catch (e2: Exception) {
-                    Log.e(TAG, "Recovery bind failed; falling back to clean unbind", e2)
-                }
+        // ───── unbindAll + retry path ─────────────────────────────────
+        // CameraX's `bindToLifecycle(selector, new...)` is NOT an atomic
+        // replace on devices that constrain the surface combination
+        // count (Xiaomi/MTK only advertises a single PRIV/PREVIEW slot
+        // and a single JPEG/STILL_CAPTURE slot). Selective `unbind()`
+        // is asynchronous on these HALs — the old surfaces aren't torn
+        // down before `bindToLifecycle` validates the combined set,
+        // causing "No supported surface combination" with 4 surfaces
+        // (2 existing + 2 new) where only 2 are supported.
+        //
+        // `unbindAll()` guarantees all surfaces are released before the
+        // new bind, at the cost of a brief black flash on lens switch.
+        //
+        // On Xiaomi/MediaTek devices the V4L2 kernel device nodes are
+        // torn down asynchronously after `unbindAll()` — without a delay
+        // the next `bindToLifecycle()` hits a half-closed device and the
+        // HAL logs "invalid device state 3". We therefore inject a short
+        // delay and retry with progressively longer waits after failures.
+
+        // Retry delays in milliseconds, tuned for MTK V4L2 node teardown.
+        val retryDelays = RETRY_DELAYS_MS
+        Log.i("LensSwitch", "bind START | logical=$logicalCameraId physical=$physicalCameraId usePhysical=$usePhysicalLens")
+
+        for ((index, delayMs) in retryDelays.withIndex()) {
+            try {
+                cameraProvider.unbindAll()
+                delay(delayMs)
+                val camera = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    selector,
+                    preview,
+                    newImageCapture
+                )
+                currentPreview = preview
+                currentImageCapture = newImageCapture
+                currentLogicalCameraId = logicalCameraId
+                // bindPreview always targets a back-facing logical camera via
+                // its specific id. currentIsFrontCamera is left untouched
+                // here because recoverySelector() short-circuits on the
+                // non-null logical id; the field is preserved across the
+                // next bindDefaultCamera call in case the user toggles
+                // to/from front and we lose the id.
+                Log.i("LensSwitch", "bind OK | attempt=${index + 1}/${retryDelays.size} delay=${delayMs}ms")
+                return BindResult(camera, newImageCapture)
+            } catch (e: Exception) {
+                Log.w(
+                    TAG,
+                    "bindPreview attempt ${index + 1}/${retryDelays.size} " +
+                        "failed (delay=${delayMs}ms, physical=$physicalCameraId, " +
+                        "logical=$logicalCameraId)",
+                    e
+                )
             }
-            // Last-resort: tear down completely so the next attempt on
-            // whatever caller is on the line gets a clean slate.
-            release(cameraProvider)
-            null
         }
+
+        // All retries exhausted. Try to restore the previous binding.
+        Log.e(
+            TAG,
+            "All bindPreview attempts failed (physical=$physicalCameraId, " +
+                "logical=$logicalCameraId); attempting recovery"
+        )
+
+        if (previousPreview != null && previousImageCapture != null) {
+            try {
+                cameraProvider.unbindAll()
+                delay(80)
+                val restored = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    recoverySelector(),
+                    previousPreview,
+                    previousImageCapture
+                )
+                Log.w(
+                    TAG,
+                    "Recovered after failed bind; previous use cases restored " +
+                        "(logical=$previousLogicalCameraId, front=${currentIsFrontCamera})"
+                )
+                currentPreview = previousPreview
+                currentImageCapture = previousImageCapture
+                currentLogicalCameraId = previousLogicalCameraId
+                Log.i("LensSwitch", "bind RECOVERY | restored previous lens (logical=$previousLogicalCameraId)")
+                return BindResult(restored, previousImageCapture)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Recovery bind failed; falling back to clean unbind", e2)
+            }
+        }
+
+        // Last-resort: tear down completely.
+        release(cameraProvider)
+        return null
     }
 
     /**
@@ -585,7 +606,7 @@ class PreviewSessionManager(
     /**
      * Binds the default front or back camera (fallback when no multi-camera setup).
      */
-    fun bindDefaultCamera(
+    suspend fun bindDefaultCamera(
         cameraProvider: ProcessCameraProvider,
         surfaceProvider: Preview.SurfaceProvider,
         imageCapture: ImageCapture,
@@ -625,42 +646,64 @@ class PreviewSessionManager(
         val previousPreview = currentPreview
         val previousImageCapture = currentImageCapture
 
-        return try {
-            cameraProvider.unbindAll()
-            val camera = cameraProvider.bindToLifecycle(
-                lifecycleOwner,
-                selector,
-                preview,
-                updatedImageCapture
-            )
-            currentPreview = preview
-            currentImageCapture = updatedImageCapture
-            // DEFAULT_*_CAMERA doesn't correspond to a known logical id;
-            // keep currentLogicalCameraId as null so the recovery path in
-            // bindPreview also resolves to DEFAULT_*_CAMERA if the next
-            // call fails.
-            currentLogicalCameraId = null
-            currentIsFrontCamera = isFrontCamera
-            camera
-        } catch (e: Exception) {
-            Log.e(TAG, "Error binding default camera", e)
-            if (previousPreview != null && previousImageCapture != null) {
-                try {
-                    val restored = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        recoverySelector(),
-                        previousPreview,
-                        previousImageCapture
-                    )
-                    Log.w(TAG, "Recovered default-camera bind; previous use cases restored")
-                    return restored
-                } catch (e2: Exception) {
-                    Log.e(TAG, "Recovery bind failed; falling back to clean unbind", e2)
-                }
+        // Retry with increasing delays — same rationale as bindPreview:
+        // on Xiaomi/MTK the V4L2 device nodes need time to fully release.
+        val retryDelays = RETRY_DELAYS_MS
+        Log.i("LensSwitch", "bindDefault START | isFront=$isFrontCamera")
+
+        for ((index, delayMs) in retryDelays.withIndex()) {
+            try {
+                cameraProvider.unbindAll()
+                delay(delayMs)
+                val camera = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    selector,
+                    preview,
+                    updatedImageCapture
+                )
+                currentPreview = preview
+                currentImageCapture = updatedImageCapture
+                // DEFAULT_*_CAMERA doesn't correspond to a known logical id;
+                // keep currentLogicalCameraId as null so the recovery path in
+                // bindPreview also resolves to DEFAULT_*_CAMERA if the next
+                // call fails.
+                currentLogicalCameraId = null
+                currentIsFrontCamera = isFrontCamera
+                Log.i("LensSwitch", "bindDefault OK | attempt=${index + 1}/${retryDelays.size} delay=${delayMs}ms")
+                return camera
+            } catch (e: Exception) {
+                Log.w(
+                    TAG,
+                    "bindDefaultCamera attempt ${index + 1}/${retryDelays.size} " +
+                        "failed (delay=${delayMs}ms, isFront=$isFrontCamera)",
+                    e
+                )
             }
-            release(cameraProvider)
-            null
         }
+
+        // All retries exhausted. Attempt recovery.
+        Log.e(TAG, "All bindDefaultCamera attempts failed (isFront=$isFrontCamera)")
+
+        if (previousPreview != null && previousImageCapture != null) {
+            try {
+                cameraProvider.unbindAll()
+                delay(80)
+                val restored = cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    recoverySelector(),
+                    previousPreview,
+                    previousImageCapture
+                )
+                Log.w(TAG, "Recovered default-camera bind; previous use cases restored")
+                currentPreview = previousPreview
+                currentImageCapture = previousImageCapture
+                return restored
+            } catch (e2: Exception) {
+                Log.e(TAG, "Recovery bind failed; falling back to clean unbind", e2)
+            }
+        }
+        release(cameraProvider)
+        return null
     }
 
     /**

@@ -59,6 +59,10 @@ class LensCatalog(private val context: Context) {
     fun enumerate(): CatalogResult {
         val profiles = mutableListOf<LensProfile>()
 
+        // Parallel to profiles: SENSOR_INFO_PHYSICAL_SIZE key for detecting
+        // virtual in-sensor-zoom crop modes (same sensor, different crop level).
+        val profileSensorKeys = mutableListOf<String?>()
+
         try {
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
@@ -98,16 +102,36 @@ class LensCatalog(private val context: Context) {
                     // YUV_420_888 streams at all. Forcing setPhysicalCameraId() on
                     // one of those via Camera2-Interop causes CameraX to fire
                     // onConfigureFailed asynchronously and we end up with a black
-                    // feed we can't recover from inside the bind call. Filtering
-                    // out profiles whose sensor has no usable preview stream keeps
-                    // the catalog honest so only real lenses ever reach the bind.
-                    if (!hasUsablePreviewStream(lensChars)) {
+                    // feed we can't recover from inside the bind call.
+                    //
+                    // On Xiaomi/MediaTek devices the physical sub-cameras do NOT
+                    // individually advertise YUV_420_888 stream configurations —
+                    // those streams only exist on the logical camera. CameraX
+                    // uses the logical camera's stream configs for session
+                    // negotiation regardless of setPhysicalCameraId(), so a
+                    // missing YUV table on the physical camera is NOT a sign
+                    // of a phantom lens on MTK. We therefore check BOTH the
+                    // physical AND the logical camera: skip only when NEITHER
+                    // has a usable preview stream.
+                    val physicalHasYuv = hasUsablePreviewStream(lensChars)
+                    // Only consider the logical camera's YUV streams when
+                    // this is a genuine sub-camera within a logical
+                    // multi-camera setup (MTK-style). On single-ID devices
+                    // (physicalId == cameraId) or non-logical-multi-cam,
+                    // the physical camera's own stream config is authoritative.
+                    val isSubCamera = isLogicalMulti && physicalId != cameraId
+                    val logicalFallback = isSubCamera && hasUsablePreviewStream(characteristics)
+                    if (!physicalHasYuv && !logicalFallback) {
                         Log.w(
                             TAG,
                             "Skipping physical camera $physicalId: no YUV_420_888 " +
-                                "preview stream available (likely phantom sub-camera)"
+                                "preview stream on physical or logical (phantom sub-camera)"
                         )
+                        Log.i("LensSwitch", "SKIP phantom | physical=$physicalId logical=$cameraId (no YUV streams)")
                         continue
+                    }
+                    if (!physicalHasYuv) {
+                        Log.i("LensSwitch", "KEEP mtk-style | physical=$physicalId logical=$cameraId (YUV only on logical)")
                     }
 
                     // Use the widest (smallest) focal length as the lens's native focal length
@@ -136,10 +160,59 @@ class LensCatalog(private val context: Context) {
                             supportsRaw = supportsRaw
                         )
                     )
+                    profileSensorKeys.add(
+                        // Non-null physical sizes are used to detect duplicate
+                        // sensors; for null sizes we fall back to the physical
+                        // camera ID so profiles are never falsely merged.
+                        physicalSize?.let { "${it.width}_${it.height}" } ?: physicalId
+                    )
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error enumerating cameras", e)
+        }
+
+        // ── Deduplicate in-sensor crop modes ──────────────────────────────
+        // Xiaomi/MediaTek HALs commonly expose a "virtual" physical camera
+        // within a logical multi-camera that represents an in-sensor zoom
+        // crop mode of the primary sensor — not a separate physical lens.
+        // These share the same SENSOR_INFO_PHYSICAL_SIZE but report a longer
+        // equivalent focal length. Detecting them by grouping (logical camera
+        // + physical sensor size) and keeping only the widest focal length
+        // eliminates phantom lenses that show a "116mm" label but route to
+        // the same sensor as the primary lens.
+        if (profileSensorKeys.size == profiles.size) {
+            val toRemove = mutableSetOf<Int>()
+            val seenGroup = mutableMapOf<String, Int>()
+            for (i in profiles.indices) {
+                val logicalId = profiles[i].logicalCameraId
+                val sensorKey = profileSensorKeys[i] ?: continue
+                val groupKey = "$logicalId|$sensorKey"
+                val existing = seenGroup[groupKey]
+                if (existing != null) {
+                    if (profiles[i].equivFocalMm < profiles[existing].equivFocalMm) {
+                        toRemove.add(existing)
+                        seenGroup[groupKey] = i
+                        Log.w(TAG, "Dedup sensor=$sensorKey logical=$logicalId — " +
+                            "keep=${profiles[i].equivFocalMm}mm(physical=${profiles[i].physicalCameraId}) " +
+                            "drop=${profiles[existing].equivFocalMm}mm(physical=${profiles[existing].physicalCameraId})")
+                    } else {
+                        toRemove.add(i)
+                        Log.w(TAG, "Dedup sensor=$sensorKey logical=$logicalId — " +
+                            "keep=${profiles[existing].equivFocalMm}mm(physical=${profiles[existing].physicalCameraId}) " +
+                            "drop=${profiles[i].equivFocalMm}mm(physical=${profiles[i].physicalCameraId})")
+                    }
+                } else {
+                    seenGroup[groupKey] = i
+                }
+            }
+            if (toRemove.isNotEmpty()) {
+                val deduped = profiles.filterIndexed { i, _ -> i !in toRemove }
+                Log.i("LensSwitch", "Dedup removed ${toRemove.size} in-sensor-zoom crop(s), " +
+                    "${deduped.size} profile(s) remain")
+                profiles.clear()
+                profiles.addAll(deduped)
+            }
         }
 
         // Sort by focal length ascending (UW first, Tele last)
@@ -157,6 +230,8 @@ class LensCatalog(private val context: Context) {
             // from logcat rather than appearing as a silent regression.
             Log.w(TAG, "enumerate(): no back-facing lenses with usable preview stream")
         }
+
+        Log.i("LensSwitch", "Catalog done | total=${profiles.size} UW=${ultraWide != null} PRI=${primary != null} TELE=${tele != null}")
 
         return CatalogResult(
             ultraWide = ultraWide,
