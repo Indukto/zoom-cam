@@ -672,7 +672,7 @@ class CameraViewModel : ViewModel() {
                 val cropArea = curW.toLong() * curH.toLong()
                 val fullArea = rotW.toLong() * rotH.toLong()
 
-                val finalBitmap: Bitmap
+                var finalBitmap: Bitmap
                 if (cropArea < fullArea * 9 / 10) {
                     val (srcL, srcT, srcR, srcB) = when (exifOrientation) {
                         ExifInterface.ORIENTATION_ROTATE_90 ->
@@ -736,7 +736,11 @@ class CameraViewModel : ViewModel() {
                 val currentLut = loadLut(context, _activePreset.value)
                 val hasAdjustments = _temperature.value != 0f || _tint.value != 0f || _exposure.value != 0f
                 if (currentLut != null || hasAdjustments) {
-                    finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
+                    val filtered = finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
+                    if (filtered !== finalBitmap) {
+                        finalBitmap.recycle()
+                        finalBitmap = filtered
+                    }
                 }
 
                 FileOutputStream(rawFile).use { out -> finalBitmap.compress(Bitmap.CompressFormat.JPEG, 97, out) }
@@ -873,6 +877,8 @@ class CameraViewModel : ViewModel() {
         val h = this.height
         if (w <= 0 || h <= 0) return this
 
+        val target = if (this.isMutable) this else this.copy(this.config ?: Bitmap.Config.ARGB_8888, true)
+
         val hasExp = expVal != 0f
         val hasTemp = tempVal != 0f
         val hasTint = tintVal != 0f
@@ -902,7 +908,7 @@ class CameraViewModel : ViewModel() {
         val rowDy2 = FloatArray(h) { y -> (y - cy).let { it * it } }
 
         val pixels = IntArray(w * h)
-        getPixels(pixels, 0, w, 0, 0, w, h)
+        target.getPixels(pixels, 0, w, 0, 0, w, h)
 
         val numChunks = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
         val total = w * h
@@ -975,10 +981,10 @@ class CameraViewModel : ViewModel() {
             }.awaitAll()
         }
 
-        setPixels(pixels, 0, w, 0, 0, w, h)
+        target.setPixels(pixels, 0, w, 0, 0, w, h)
 
-        if (lut != null) LutColorFilter.applyInPlace(this, lut)
-        return this
+        if (lut != null) LutColorFilter.applyInPlace(target, lut)
+        return target
     }
 
     override fun onCleared() { super.onCleared(); try { shutterSound.release() } catch (_: Exception) {} }
