@@ -53,6 +53,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.displayCutoutPadding
@@ -87,6 +88,9 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.TextButton
@@ -194,6 +198,22 @@ private fun DrawScope.drawThirdsGrid(
     drawLine(color = color, start = Offset(thirdW2, rect.top), end = Offset(thirdW2, rect.bottom), strokeWidth = strokeWidth)
     drawLine(color = color, start = Offset(rect.left, thirdH1), end = Offset(rect.right, thirdH1), strokeWidth = strokeWidth)
     drawLine(color = color, start = Offset(rect.left, thirdH2), end = Offset(rect.right, thirdH2), strokeWidth = strokeWidth)
+}
+
+private fun filmPresetColor(preset: FilmPreset): Color = when (preset) {
+    FilmPreset.KODAK_PORTRA       -> Color(0xFFD4A56A)
+    FilmPreset.KODAK_BW           -> Color(0xFF6B6B6B)
+    FilmPreset.POLAROID           -> Color(0xFF4A90B0)
+    FilmPreset.KODAK_ELITE_100_XPRO -> Color(0xFFC04040)
+    FilmPreset.POLAROID_669       -> Color(0xFF8B5E8B)
+}
+
+private fun filmPresetEmoji(preset: FilmPreset): String = when (preset) {
+    FilmPreset.KODAK_PORTRA       -> "🌅"
+    FilmPreset.KODAK_BW           -> "🌑"
+    FilmPreset.POLAROID           -> "📸"
+    FilmPreset.KODAK_ELITE_100_XPRO -> "🎞️"
+    FilmPreset.POLAROID_669       -> "🌆"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1184,6 +1204,7 @@ fun CameraPermissionOnboarding(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun CameraActiveScreen(
     viewModel: CameraViewModel,
     onOpenSettings: () -> Unit
@@ -1951,93 +1972,100 @@ fun CameraActiveScreen(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Text(
-                            text = "◉",
-                            color = Color(0xFFFBBF24),
-                            fontSize = 18.sp,
-                            fontFamily = FontFamily.Serif
-                        )
-                        Text(
-                            text = activePreset.displayName,
-                            color = Color.White,
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            modifier = Modifier.padding(horizontal = 2.dp)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(filmPresetColor(activePreset)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = filmPresetEmoji(activePreset),
+                                fontSize = 18.sp
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Preset Picker Dialog
+        // Preset Picker Bottom Sheet
         if (showPresetPicker) {
-            AlertDialog(
+            ModalBottomSheet(
                 onDismissRequest = { showPresetPicker = false },
-                title = {
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                containerColor = Color(0xFF1A1A1E),
+                contentColor = Color.White
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
                     Text(
-                        "Film Style",
+                        text = "Film Style",
                         color = Color.White,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        fontSize = 18.sp,
+                        modifier = Modifier.padding(bottom = 16.dp)
                     )
-                },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilmPreset.values().forEach { preset ->
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp)
+                    ) {
+                        items(FilmPreset.values()) { preset ->
                             val selected = preset == activePreset
-                            Row(
+                            Column(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(12.dp))
                                     .background(
-                                        if (selected) Color(0xFFFBBF24).copy(alpha = 0.15f)
+                                        if (selected) Color(0xFFFBBF24).copy(alpha = 0.12f)
                                         else Color(0xFF2C2C2E)
                                     )
                                     .border(
-                                        1.dp,
-                                        if (selected) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.08f),
-                                        RoundedCornerShape(10.dp)
+                                        1.5.dp,
+                                        if (selected) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.06f),
+                                        RoundedCornerShape(12.dp)
                                     )
                                     .clickable {
                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         viewModel.setCameraPreset(preset)
                                         showPresetPicker = false
                                     }
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                    .padding(8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Column {
+                                Box(
+                                    modifier = Modifier
+                                        .size(60.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(filmPresetColor(preset)),
+                                    contentAlignment = Alignment.Center
+                                ) {
                                     Text(
-                                        text = preset.displayName,
-                                        color = if (selected) Color(0xFFFBBF24) else Color.White,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 15.sp
-                                    )
-                                    Text(
-                                        text = "3D LUT film profile",
-                                        color = Color.Gray,
-                                        fontSize = 12.sp
+                                        text = filmPresetEmoji(preset),
+                                        fontSize = 24.sp
                                     )
                                 }
-                                if (selected) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Check,
-                                        contentDescription = null,
-                                        tint = Color(0xFFFBBF24),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = preset.displayName,
+                                    color = if (selected) Color(0xFFFBBF24) else Color.White.copy(alpha = 0.85f),
+                                    fontSize = 10.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 2,
+                                    textAlign = TextAlign.Center,
+                                    lineHeight = 12.sp
+                                )
                             }
                         }
                     }
-                },
-                confirmButton = {},
-                dismissButton = {},
-                containerColor = Color(0xFF1E1E1E),
-                tonalElevation = 0.dp
-            )
+                }
+            }
         }
 
         // Delete confirmation dialog. Intercepted before the PhotoViewerOverlay
