@@ -3,6 +3,7 @@ package com.example.color
 import android.graphics.SurfaceTexture
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.util.Log
@@ -159,6 +160,15 @@ class LutPreviewRenderer(
         val lut = IntArray(1)
         GLES20.glGenTextures(1, lut, 0)
         lutTexture = lut[0]
+
+        // Default GL_UNPACK_ALIGNMENT is 4, which only works when rows are a
+        // multiple of 4 bytes. A 3D LUT stored as GL_RGB has 3 bytes per texel
+        // — for any LUT size n where n * 3 is NOT a multiple of 4 (e.g. the
+        // bundled 13-cube LUTs at 39 bytes/row) the driver inserts phantom
+        // pad bytes and the next row's channels phase-shift, producing the
+        // classic psychedelic rainbow banding. Pin alignment to 1 (no padding)
+        // here so subsequent glTexImage3D uploads are always tightly packed.
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -202,7 +212,7 @@ class LutPreviewRenderer(
 
         if (lutEnabled && lutWidth > 0) {
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_3D, lutTexture)
+            GLES20.glBindTexture(GLES30.GL_TEXTURE_3D, lutTexture)
             GLES20.glUniform1i(uLutLoc, 1)
         }
         GLES20.glUniform1i(uLutEnabledLoc, if (lutEnabled && lutWidth > 0) 1 else 0)
@@ -244,14 +254,18 @@ class LutPreviewRenderer(
         }
         buf.position(0)
 
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_3D, lutTexture)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_3D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_3D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_3D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_3D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_3D, GLES20.GL_TEXTURE_WRAP_R, GLES20.GL_CLAMP_TO_EDGE)
-        GLES20.glTexImage3D(
-            GLES20.GL_TEXTURE_3D, 0, GLES20.GL_RGB,
+        GLES20.glBindTexture(GLES30.GL_TEXTURE_3D, lutTexture)
+        GLES20.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES30.GL_TEXTURE_3D, GLES30.GL_TEXTURE_WRAP_R, GLES20.GL_CLAMP_TO_EDGE)
+        // Belt-and-suspenders: also set UNPACK_ALIGNMENT on every upload so a
+        // foreign driver that resets it between contexts can't reintroduce
+        // the rainbow banding. See onSurfaceCreated for context.
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+        GLES30.glTexImage3D(
+            GLES30.GL_TEXTURE_3D, 0, GLES20.GL_RGB,
             n, n, n, 0, GLES20.GL_RGB, GLES20.GL_UNSIGNED_BYTE, buf
         )
         lutWidth = n
@@ -264,10 +278,26 @@ class LutPreviewRenderer(
      * Returns full extent (0,0,1,1) when the surface size isn't known yet.
      */
     private fun computeFillCenterCrop(): FloatArray {
-        val bw = surfaceBufferWidth
-        val bh = surfaceBufferHeight
+        var bw = surfaceBufferWidth
+        var bh = surfaceBufferHeight
         if (bw <= 0 || bh <= 0 || viewWidth <= 0 || viewHeight <= 0) {
             return floatArrayOf(0f, 0f, 1f, 1f)
+        }
+        // CameraX writes frames to the SurfaceTexture in sensor-natural
+        // orientation (almost always landscape on phones) and sets the
+        // stMatrix to rotate them to display-natural during sampling.
+        // uTexCrop is applied BEFORE uStMatrix in the vertex shader, so
+        // it operates in pre-rotation buffer coords. For 90°/270°
+        // rotations the buffer's post-rotation aspect is W:H inverted,
+        // so the buffer-side crop math has to use the swapped dims to
+        // produce a fill that's correct in display space. We detect the
+        // swap by checking the off-diagonal entries that are non-zero on
+        // 90°/270° rotation matrices (identity and 180° leave them at 0,
+        // so the crop math runs unchanged there).
+        if (kotlin.math.abs(stMatrix[1]) > 0.5f || kotlin.math.abs(stMatrix[4]) > 0.5f) {
+            val tmp = bw
+            bw = bh
+            bh = tmp
         }
         val bufferAspect = bw.toFloat() / bh.toFloat()
         val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
@@ -395,8 +425,9 @@ class LutPreviewRenderer(
             #extension GL_OES_EGL_image_external : require
             #extension GL_OES_texture_3D : enable
             precision mediump float;
+            precision mediump sampler3D;
             uniform samplerExternalOES uTexture;
-            uniform sampler3D uLut;
+            uniform mediump sampler3D uLut;
             uniform float uTemperature;
             uniform float uTint;
             uniform float uExposure;

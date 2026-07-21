@@ -16,7 +16,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
-import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -24,7 +23,6 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
@@ -45,6 +43,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.color.CubeLut
+import com.example.color.CubeLutParser
+import com.example.color.LutPreviewView
 import com.example.zoom.CaptureExtension
 import com.example.zoom.LensCatalog
 import com.example.zoom.LensRole
@@ -203,6 +204,9 @@ fun CameraPreviewView(
     activeExtension: CaptureExtension = CaptureExtension.NONE,
     isRawCapturing: Boolean = false,
     zoomEnabled: Boolean = true,
+    temperature: Float = 0f,
+    tint: Float = 0f,
+    activeLut: CubeLut? = null,
     onZoomChanged: (Float) -> Unit,
     onZoomTick: () -> Unit = {},
     onAvailableFocalLengths: (List<Float>) -> Unit,
@@ -214,12 +218,11 @@ fun CameraPreviewView(
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
 
-    val previewView = remember {
-        PreviewView(context).apply {
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            scaleType = PreviewView.ScaleType.FILL_CENTER
-        }
-    }
+    // OpenGL-backed preview surface. Renders camera frames through the
+    // WB + 3D-LUT fragment shader (see LutPreviewRenderer). Replaces the
+    // stock androidx.camera.view.PreviewView, which only supports flat
+    // color overlays.
+    val previewView = remember { LutPreviewView(context) }
 
     val imageCapture = remember {
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -378,6 +381,24 @@ fun CameraPreviewView(
             1 -> ImageCapture.FLASH_MODE_ON
             else -> ImageCapture.FLASH_MODE_OFF
         }
+    }
+
+    // Push white-balance + exposure into the GL renderer every time they
+    // change. The renderer marshals the values onto the GL thread.
+    LaunchedEffect(temperature, tint, exposure) {
+        previewView.setWhiteBalance(temperature, tint, exposure)
+    }
+
+    // Push the active LUT into the GL renderer. Loads (and caches) the LUT
+    // from assets on first use.
+    LaunchedEffect(activeLut) {
+        previewView.setLut(activeLut)
+    }
+
+    // Mirror the front-camera preview horizontally to match the stock
+    // PreviewView behavior (selfie mirror).
+    LaunchedEffect(isFrontCamera) {
+        previewView.setFlipH(isFrontCamera)
     }
 
     // Zoom gesture — seed from current digitalZoomRatio

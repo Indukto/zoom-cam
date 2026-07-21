@@ -1223,6 +1223,12 @@ fun CameraActiveScreen(
     val activeExtension by viewModel.activeExtension.collectAsState()
     val availableExtensions by viewModel.availableExtensions.collectAsState()
     val extensionsProbeDone by viewModel.extensionsProbeDone.collectAsState()
+    val activePreset by viewModel.activePreset.collectAsState()
+
+    // Load the active preset's LUT for the live viewfinder GL shader.
+    val previewLut = remember(activePreset) {
+        viewModel.loadLut(context, activePreset)
+    }
 
     val mainExecutor = ContextCompat.getMainExecutor(context)
     var activeImageCapture by remember { mutableStateOf<ImageCapture?>(null) }
@@ -1321,6 +1327,9 @@ fun CameraActiveScreen(
             activeExtension = activeExtension,
             isRawCapturing = isCapturing && rawModeEnabled,
             zoomEnabled = !(showExpSlider || showTempSlider),
+            temperature = temperature,
+            tint = tint,
+            activeLut = previewLut,
             onZoomChanged = { viewModel.setZoom(it) },
             onZoomTick = {
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -1329,36 +1338,6 @@ fun CameraActiveScreen(
             imageCaptureProvider = { activeImageCapture = it },
             onLensCatalogReady = { result -> viewModel.setLensCatalogResult(result) }
         )
-
-        // Color overlay for retro temperature tint
-        if (temperature != 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        if (temperature > 0f) {
-                            Color(0xFFF59E0B).copy(alpha = (temperature * 0.08f).coerceIn(0f, 0.22f))
-                        } else {
-                            Color(0xFF0EA5E9).copy(alpha = (-temperature * 0.08f).coerceIn(0f, 0.22f))
-                        }
-                    )
-            )
-        }
-
-        // Color overlay for retro tint (green/magenta)
-        if (tint != 0f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        if (tint > 0f) {
-                            Color(0xFFEC4899).copy(alpha = (tint * 0.08f).coerceIn(0f, 0.22f))
-                        } else {
-                            Color(0xFF22C55E).copy(alpha = (-tint * 0.08f).coerceIn(0f, 0.22f))
-                        }
-                    )
-            )
-        }
 
         // Countdown timer overlay
         if (timerCountdown > 0) {

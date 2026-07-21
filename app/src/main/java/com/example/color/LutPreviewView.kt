@@ -70,6 +70,15 @@ class LutPreviewView(
             }
 
             try {
+                // Tell SurfaceTexture what CameraX asked for BEFORE wrapping
+                // it in a Surface. Without this, the SurfaceTexture keeps its
+                // default (0x0) buffer size and CameraX falls back to its
+                // lowest-res preview size — the live viewfinder renders as a
+                // blurry upscaled thumbnail. Setting the buffer size to the
+                // same resolution CameraX requested matches both sides and
+                // unlocks a sharp preview at the sensor-native frame size.
+                st.setDefaultBufferSize(resolution.width, resolution.height)
+
                 // The renderer owns its own SurfaceTexture; we wrap it as a
                 // Surface for CameraX. We must track this wrapper so we can
                 // release it when CameraX signals session teardown.
