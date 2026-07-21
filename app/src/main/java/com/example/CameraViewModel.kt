@@ -747,7 +747,7 @@ class CameraViewModel : ViewModel() {
                         finalBitmap.applyRetroFilter(_temperature.value, _tint.value, _exposure.value, lut = currentLut)
                     }
 
-                    FileOutputStream(rawFile).use { out -> finalBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out) }
+                    FileOutputStream(rawFile).use { out -> finalBitmap.compress(Bitmap.CompressFormat.JPEG, 97, out) }
                     finalBitmap.recycle()
 
                     val focalDir = rawFile.parentFile
@@ -880,58 +880,22 @@ class CameraViewModel : ViewModel() {
             } catch (e: Exception) { Log.e("CameraViewModel", "Error deleting photo", e) }
         }
     }
-
     private fun Bitmap.applyRetroFilter(
         tempVal: Float,
         tintVal: Float,
         expVal: Float,
         lut: CubeLut? = null
     ): Bitmap {
-        // Two-pass retro-grade pipeline. Replaces the previous
-        // LutColorFilter.apply (alloc #1) + Canvas re-render onto a fresh
-        // bitmap (alloc #2) + 4 separate filter passes (alloc #3–6) with two
-        // in-place bitmap scans and zero intermediate ARGB_8888 allocations.
-        // Stages happen in the SAME order as the old pipeline so the saved
-        // photo is byte-equivalent (modulo LSB rounding) to what the old
-        // version produced:
-        //
-        //   Pass 1 — LUT: LutColorFilter.applyInPlace mutates this. Same
-        //             trilinear as LutColorFilter.apply — this is the original
-        //             "Step 0: LUT first" of the legacy pipeline (see the
-        //             Step 0 comment above the prior implementation).
-        //   Pass 2 — exposure, temp, tint, vignette: a single pixel loop that
-        //             replaces 4 Canvas passes (ColorMatrix exposure,
-        //             PorterDuff SRC_ATOP × 2, RadialGradient vignette).
-        //
-        // Per-pixel math reproduces the original Canvas pipeline:
-        //   Exposure: ADDITIVE byte-bias matching the original ColorMatrix
-        //             `(offset = ev * 20)` per channel. ColorMatrixColorFilter
-        //             applies the 5th-column offset in [0..255] byte space, so
-        //             this gives `R_new = R + ev*20` (clamped). Earlier draft
-        //             of this rewrite accidentally switched to a multiplicative
-        //             `2^(ev*0.4)` curve — that was a visual regression on
-        //             saved photos; reverted to additive.
-        //   Temperature/Tint: PorterDuff SRC_ATOP blend with constant tintColor.
-        //             For an opaque destination, `out = tintA*c_tint + (1-tintA)*pix`
-        //             in 0..255 space ⇒ `(c_tint*tintA + pix*(255-tintA)) / 255`.
-        //   Vignette: RadialGradient (TRANSPARENT → argb(135,12,12,12)) at
-        //             stops 0.55 and 1.0 of `0.72 * max(w,h)`. Shader alpha
-        //             and color both interpolate, so SRC_OVER gives
-        //             `pix*(1 - 0.529t) + 6.35*t²` (corners).
         val w = this.width
         val h = this.height
         if (w <= 0 || h <= 0) return this
 
-        // Pass 1 — LUT first (matches the original Step 0 ordering).
-        if (lut != null) LutColorFilter.applyInPlace(this, lut)
-
-        // Pre-compute the offsets used in pass 2. All four are no-ops when the
-        // corresponding slider is at 0, so we can skip the pixel loop entirely
-        // if everything is neutral.
-        val hasExposure = expVal != 0f
-        val expOffset = if (hasExposure) (expVal * 20f).toInt().coerceIn(-255, 255) else 0
-
+        val hasExp = expVal != 0f
         val hasTemp = tempVal != 0f
+        val hasTint = tintVal != 0f
+
+        val expScale = if (hasExp) java.lang.Math.pow(2.0, (expVal * 0.4).toDouble()).toFloat() else 1f
+
         val tempIsPos = tempVal > 0f
         val tempR = if (hasTemp && tempIsPos) 245 else if (hasTemp) 14 else 0
         val tempG = if (hasTemp && tempIsPos) 158 else if (hasTemp) 165 else 0
@@ -939,7 +903,6 @@ class CameraViewModel : ViewModel() {
         val tempA = if (hasTemp) (kotlin.math.abs(tempVal) * 25f).toInt().coerceIn(0, 80) else 0
         val tempInvA = 255 - tempA
 
-        val hasTint = tintVal != 0f
         val tintIsPos = tintVal > 0f
         val tintR = if (hasTint && tintIsPos) 236 else if (hasTint) 34 else 0
         val tintG = if (hasTint && tintIsPos) 72 else if (hasTint) 197 else 0
@@ -953,25 +916,21 @@ class CameraViewModel : ViewModel() {
         val maxRadiusInv = 1f / maxRadius
         val vigInner = 0.55f
         val vigRange = 0.45f
-        val vigFadeMax = 135f / 255f  // ≈ 0.529 alpha at the outer stop
+        val vigFadeMax = 135f / 255f
         val cornerRgb = 12f
+        val innerRadiusSq = (vigInner * maxRadius) * (vigInner * maxRadius)
 
-        // Vignette runs unconditionally — the original Canvas pipeline draws
-        // it regardless of slider state. Skipping on neutral sliders would
-        // diverge from byte-equivalent output, so always run the loop.
+        val rowDy2 = FloatArray(h) { y -> (y - cy).let { it * it } }
+
         val pixels = IntArray(w * h)
         getPixels(pixels, 0, w, 0, 0, w, h)
 
-        // Pass 2 — exposure, temp, tint, vignette in one loop. Vignette runs
-        // unconditionally regardless of the slider state to keep behavior
-        // identical to the legacy Canvas pipeline.
         var p = 0
         val total = w * h
         while (p < total) {
             val x = p % w
             val y = p / w
             val dx = x - cx
-            val dy = y - cy
 
             val c = pixels[p]
             val a = (c ushr 24) and 0xFF
@@ -979,45 +938,38 @@ class CameraViewModel : ViewModel() {
             var g8 = (c ushr 8) and 0xFF
             var b8 = c and 0xFF
 
-            // 1. Exposure: additive byte-bias (matches the old ColorMatrix
-            //    where the 5th-column offset is byte-space, not normalized).
-            if (hasExposure) {
-                r8 = (r8 + expOffset).coerceIn(0, 255)
-                g8 = (g8 + expOffset).coerceIn(0, 255)
-                b8 = (b8 + expOffset).coerceIn(0, 255)
+            if (hasExp) {
+                r8 = (r8 * expScale).toInt().coerceIn(0, 255)
+                g8 = (g8 * expScale).toInt().coerceIn(0, 255)
+                b8 = (b8 * expScale).toInt().coerceIn(0, 255)
             }
 
-            // 2. Temperature tint: SRC_ATOP blend with the warm/cool tintColor.
             if (hasTemp) {
                 r8 = (r8 * tempInvA + tempR * tempA) / 255
                 g8 = (g8 * tempInvA + tempG * tempA) / 255
                 b8 = (b8 * tempInvA + tempB * tempA) / 255
             }
 
-            // 3. Tint: SRC_ATOP blend with the magenta/green tintColor.
             if (hasTint) {
                 r8 = (r8 * tintInvA + tintR * tintA) / 255
                 g8 = (g8 * tintInvA + tintG * tintA) / 255
                 b8 = (b8 * tintInvA + tintB * tintA) / 255
             }
 
-            // 4. Vignette (RadialGradient equivalent). At distance d normalized
-            //    to maxRadius, t = clamp((d - 0.55) / 0.45, 0, 1). Shader:
-            //      α_shader = t * 135 / 255
-            //      c_shader = t * (12, 12, 12)
-            //    SRC_OVER: out = pix*(1-α_shader) + c_shader*α_shader
-            //    = pix*(1 - 0.529·t) + 12t · (135t/255) = pix*(1 - 0.529·t) + 6.35·t²
-            val dist = kotlin.math.sqrt(dx * dx + dy * dy)
-            val radialT = (dist * maxRadiusInv - vigInner) / vigRange
-            if (radialT > 0f) {
-                val clampedT = if (radialT > 1f) 1f else radialT
-                val shaderA = clampedT * vigFadeMax
-                val shaderC = clampedT * cornerRgb
-                val invA = 1f - shaderA
-                val cornerContrib = shaderC * shaderA
-                r8 = (r8 * invA + cornerContrib).toInt().coerceIn(0, 255)
-                g8 = (g8 * invA + cornerContrib).toInt().coerceIn(0, 255)
-                b8 = (b8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+            val distSq = dx * dx + rowDy2[y]
+            if (distSq > innerRadiusSq) {
+                val dist = kotlin.math.sqrt(distSq)
+                val radialT = (dist * maxRadiusInv - vigInner) / vigRange
+                if (radialT > 0f) {
+                    val clampedT = if (radialT > 1f) 1f else radialT
+                    val shaderA = clampedT * vigFadeMax
+                    val shaderC = clampedT * cornerRgb
+                    val invA = 1f - shaderA
+                    val cornerContrib = shaderC * shaderA
+                    r8 = (r8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                    g8 = (g8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                    b8 = (b8 * invA + cornerContrib).toInt().coerceIn(0, 255)
+                }
             }
 
             pixels[p] = (a shl 24) or (r8 shl 16) or (g8 shl 8) or b8
@@ -1025,6 +977,8 @@ class CameraViewModel : ViewModel() {
         }
 
         setPixels(pixels, 0, w, 0, 0, w, h)
+
+        if (lut != null) LutColorFilter.applyInPlace(this, lut)
         return this
     }
 

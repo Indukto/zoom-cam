@@ -112,7 +112,7 @@ fun captureWithCamera2(
                         override fun onConfigured(session: CameraCaptureSession) {
                             val requestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
                             requestBuilder.addTarget(imageReader.surface)
-                            requestBuilder.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
+                            requestBuilder.set(CaptureRequest.JPEG_QUALITY, 97.toByte())
                             requestBuilder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
                             when (flashMode) {
                                 0 -> requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
