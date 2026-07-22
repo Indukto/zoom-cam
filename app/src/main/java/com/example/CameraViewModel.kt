@@ -89,7 +89,10 @@ enum class FilmPreset(
     ),
     POLAROID("Polaroid PX-680", "luts/polaroid_px-680.cube"),
     KODAK_ELITE_100_XPRO("Kodak Elite 100 XPro", "luts/kodak_elite_100_xpro.cube"),
-    POLAROID_669("Polaroid 669 ++", "luts/polaroid_669_++.cube")
+    POLAROID_669("Polaroid 669 ++", "luts/polaroid_669_++.cube"),
+    MOODY("Moody", "luts/moody.cube"),
+    MUTED_MEADOW("Muted Meadow", "luts/Muted Meadow.cube"),
+    SUNLIT_SPILL("Sunlit Spill", "luts/Sunlit Spill.cube");
 }
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
